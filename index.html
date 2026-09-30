@@ -449,6 +449,7 @@ async function simpanPenerimaan(h, item, user = ME) {
     t.set('pergerakan_stok', t.newId('pergerakan_stok'), {
       tanggal: h.tanggal, lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan,
       jenis: 'masuk', qty: netto, saldoSetelah: saldo, refJenis: 'penerimaan_bb', refNo: no.noDok,
+      supplierKode: h.supplierKode, supplierNama: h.supplierNama,
       dibuatOleh: user.nama, dibuatPada: now
     });
     return no.noDok;
@@ -514,6 +515,7 @@ async function konfirmasiTerimaSP(noDok, user = ME) {
       t.set('pergerakan_stok', t.newId('pergerakan_stok'), {
         tanggal: dok.tanggal, lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan,
         jenis: 'keluar', qty: it.qtyKirim, saldoSetelah: saldo, refJenis: 'dokumen_kirim', refNo: noDok,
+        supplierKode: it.supplierKode, supplierNama: it.supplierNama,
         dibuatOleh: user.nama, dibuatPada: now
       });
     }
@@ -659,30 +661,41 @@ async function go(modId, page) {
 
 /* ===================== HALAMAN: DASHBOARD ===================== */
 async function pageDashboard(el) {
-  const [barang, stok, terima, kirim, gerak] = await Promise.all([
-    Store.list('master_barang'), Store.list('stok'), Store.list('penerimaan_bb'),
+  const [barang, stok, lots, terima, kirim, gerak] = await Promise.all([
+    Store.list('master_barang'), Store.list('stok'), Store.list('stok_supplier'), Store.list('penerimaan_bb'),
     Store.list('dokumen_kirim'), Store.list('pergerakan_stok')
   ]);
   const stokMap = {};
   stok.filter(s => s.lokasi === 'GBB').forEach(s => stokMap[s.kodeBarang] = s.qty);
+  const lotsGBB = lots.filter(l => l.lokasi === 'GBB');
   const bahanBaku = barang.filter(b => b.kategori === 'bahan_baku' && b.aktif !== false).sort(byKode);
   const gerakGBB = gerak.filter(g => g.lokasi === 'GBB');
   const bln0 = todayStr().slice(0, 7);
+  const awalBulan = bln0 + '-01', hariIni = todayStr();
   const kirimGbb = kirim.filter(k => k.dari === 'GBB');
   const menunggu = kirimGbb.filter(k => k.status === 'dikirim');
   const stBadge = { aman: '<span class="badge b-ok">Aman</span>', menipis: '<span class="badge b-warn">Menipis</span>', habis: '<span class="badge b-bad">Habis</span>' };
   const namaBulan = BULAN[+bln0.slice(5) - 1] + ' ' + bln0.slice(0, 4);
+  const dlmRentang = (tgl, dari, sampai) => tgl && (!dari || tgl >= dari) && (!sampai || tgl <= sampai);
 
-  const hitungRows = bln => bahanBaku.map(b => {
+  const hitungRows = (dari, sampai) => bahanBaku.map(b => {
     const sisa = stokMap[b.kode] || 0, min = +b.stokMin || 0;
     let masuk = 0, keluar = 0;
-    gerakGBB.forEach(g => { if (g.kodeBarang === b.kode && g.tanggal?.startsWith(bln)) { if (g.jenis === 'masuk') masuk += g.qty; else keluar += g.qty; } });
+    gerakGBB.forEach(g => { if (g.kodeBarang === b.kode && dlmRentang(g.tanggal, dari, sampai)) { if (g.jenis === 'masuk') masuk += g.qty; else keluar += g.qty; } });
     masuk = r3(masuk); keluar = r3(keluar);
     const awal = r3(sisa - masuk + keluar);
     const st = sisa <= 0 ? 'habis' : (min && sisa < min) ? 'menipis' : 'aman';
     return { ...b, sisa, min, awal, masuk, keluar, st };
   });
-  const low = hitungRows(bln0).filter(r => r.st !== 'aman');
+  const low = hitungRows(awalBulan, hariIni).filter(r => r.st !== 'aman');
+
+  const hitungRowsSupplier = (dari, sampai) => lotsGBB.map(l => {
+    let masuk = 0, keluar = 0;
+    gerakGBB.forEach(g => { if (g.kodeBarang === l.kodeBarang && g.supplierKode === l.supplierKode && dlmRentang(g.tanggal, dari, sampai)) { if (g.jenis === 'masuk') masuk += g.qty; else keluar += g.qty; } });
+    masuk = r3(masuk); keluar = r3(keluar);
+    const awal = r3(l.qty - masuk + keluar);
+    return { ...l, awal, masuk, keluar };
+  }).sort((a, b) => a.supplierNama.localeCompare(b.supplierNama) || a.namaBarang.localeCompare(b.namaBarang));
 
   const gerakTerbaru = [...gerakGBB].sort((a, b) => (b.tanggal + b.dibuatPada).localeCompare(a.tanggal + a.dibuatPada)).slice(0, 12);
 
@@ -694,11 +707,17 @@ async function pageDashboard(el) {
       <div class="stat"><div class="stat-l">Supply ke SP ${namaBulan}</div><div class="stat-v">${kirimGbb.filter(k => k.tanggal?.startsWith(bln0)).length}</div><div class="stat-s">dokumen</div></div>
       <div class="stat info"><div class="stat-l">Menunggu diterima SP</div><div class="stat-v">${menunggu.length}</div><div class="stat-s">dokumen belum memotong stok</div></div>
     </div>
+    <section class="card">
+      <div class="card-h"><h3>Periode Masuk / Keluar</h3>
+        <label class="muted" style="font-size:12px">Dari <input type="date" id="pDari" value="${awalBulan}" style="width:auto;display:inline-block"></label>
+        <label class="muted" style="font-size:12px">Sampai <input type="date" id="pSampai" value="${hariIni}" style="width:auto;display:inline-block"></label>
+        <button class="btn btn-sm" id="pBulanIni">Bulan ini</button>
+      </div>
+      <p class="muted" style="font-size:12px;margin:0">Berlaku untuk tabel Stok Bahan Baku dan Rekap per Supplier di bawah. Contoh: isi 1-30 untuk melihat rekap sebulan penuh.</p>
+    </section>
     <div class="grid2">
       <section class="card">
-        <div class="card-h"><h3>Stok Bahan Baku</h3>
-          <input type="month" id="mStok" value="${bln0}" title="Periode Masuk/Keluar">
-          <input type="search" id="qStok" placeholder="Cari barang…"></div>
+        <div class="card-h"><h3>Stok Bahan Baku</h3><input type="search" id="qStok" placeholder="Cari barang…"></div>
         <div class="table-wrap"><table class="tbl" id="tStok">
           <thead><tr><th>Kode</th><th>Nama</th><th class="num">Stok Minimal</th><th class="num">Stok Awal</th><th class="num">Masuk</th><th class="num">Keluar</th><th class="num">Sisa Stok</th><th>Status</th></tr></thead>
           <tbody id="tStokBody"></tbody>
@@ -715,9 +734,19 @@ async function pageDashboard(el) {
             <td class="num">${fmtNum(g.saldoSetelah)}</td></tr>`).join('') : empty(4)}</tbody>
         </table></div>
       </section>
-    </div>`;
+    </div>
+    <section class="card">
+      <div class="card-h"><h3>Rekap Stok per Supplier</h3><input type="search" id="qSup" placeholder="Cari supplier / barang…"></div>
+      <div class="table-wrap"><table class="tbl" id="tSup">
+        <thead><tr><th>Supplier</th><th>Kode</th><th>Nama Barang</th><th class="num">Stok Awal</th><th class="num">Masuk</th><th class="num">Keluar</th><th class="num">Sisa Stok</th></tr></thead>
+        <tbody id="tSupBody"></tbody>
+      </table></div>
+      <p class="muted" style="font-size:12px;margin:10px 0 0">Sisa Stok = stok yang secara fisik masih tercatat berasal dari supplier tersebut di Gudang Bahan Baku saat ini (belum dikonfirmasi diterima SP).</p>
+    </section>`;
+
   const renderBody = () => {
-    const rows = hitungRows($('#mStok').value || bln0);
+    const dari = $('#pDari').value, sampai = $('#pSampai').value;
+    const rows = hitungRows(dari, sampai);
     $('#tStokBody').innerHTML = rows.length ? rows.map(r => `<tr data-q="${esc((r.kode + ' ' + r.nama).toLowerCase())}">
       <td class="mono">${esc(r.kode)}</td><td>${esc(r.nama)}</td>
       <td class="num muted">${r.min ? fmtNum(r.min) : '—'}</td>
@@ -727,12 +756,24 @@ async function pageDashboard(el) {
       <td class="num"><b>${fmtNum(r.sisa)}</b> ${esc(r.satuan)}</td>
       <td>${stBadge[r.st]}</td></tr>`).join('')
       : empty(8, 'Belum ada bahan baku. Tambahkan di Master Barang.');
-    const q = $('#qStok').value.toLowerCase();
-    el.querySelectorAll('#tStokBody tr[data-q]').forEach(tr => tr.hidden = !tr.dataset.q.includes(q));
+    const q1 = $('#qStok').value.toLowerCase();
+    el.querySelectorAll('#tStokBody tr[data-q]').forEach(tr => tr.hidden = !tr.dataset.q.includes(q1));
+
+    const rowsSup = hitungRowsSupplier(dari, sampai);
+    $('#tSupBody').innerHTML = rowsSup.length ? rowsSup.map(r => `<tr data-q="${esc((r.supplierNama + ' ' + r.kodeBarang + ' ' + r.namaBarang).toLowerCase())}">
+      <td>${esc(r.supplierNama)}</td><td class="mono">${esc(r.kodeBarang)}</td><td>${esc(r.namaBarang)}</td>
+      <td class="num">${fmtNum(r.awal)}</td>
+      <td class="num in">${r.masuk ? '+' + fmtNum(r.masuk) : '—'}</td>
+      <td class="num out">${r.keluar ? '−' + fmtNum(r.keluar) : '—'}</td>
+      <td class="num"><b>${fmtNum(r.qty)}</b> ${esc(r.satuan)}</td></tr>`).join('')
+      : empty(7, 'Belum ada penerimaan bahan baku dari supplier manapun.');
+    const q2 = $('#qSup').value.toLowerCase();
+    el.querySelectorAll('#tSupBody tr[data-q]').forEach(tr => tr.hidden = !tr.dataset.q.includes(q2));
   };
   renderBody();
-  $('#mStok').onchange = renderBody;
-  $('#qStok').oninput = renderBody;
+  $('#pDari').onchange = renderBody; $('#pSampai').onchange = renderBody;
+  $('#pBulanIni').onclick = () => { $('#pDari').value = awalBulan; $('#pSampai').value = hariIni; renderBody(); };
+  $('#qStok').oninput = renderBody; $('#qSup').oninput = renderBody;
 }
 
 /* ===================== EDITOR BARIS BARANG ===================== */
