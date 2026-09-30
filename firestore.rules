@@ -55,25 +55,32 @@ service cloud.firestore {
       allow create: if hasRole(['admin', 'gudang_bb']);
       allow update, delete: if false;
     }
-    // Harga: Gudang BB boleh mengisi saat penerimaan, tapi tidak bisa membacanya.
+    // Harga: diisi belakangan oleh Admin saja (bukan Gudang BB). Hanya Admin & Management bisa membaca.
     match /nilai_penerimaan/{noDok} {
       allow read: if hasRole(['admin', 'management']);
-      allow create: if hasRole(['admin', 'gudang_bb']);
-      allow update: if hasRole(['admin']);
+      allow create, update: if hasRole(['admin']);
       allow delete: if false;
     }
 
     // ---------- Perpindahan antar divisi ----------
+    // Catatan: sampai modul SP dibuat, konfirmasi "diterima" (yang memotong stok Gudang BB)
+    // hanya dilakukan oleh admin — lihat juga match /stok dan /stok_supplier di bawah.
     match /dokumen_kirim/{noDok} {
       allow read: if isUser();
       allow create: if bolehLokasi(request.resource.data.dari);
       // Divisi penerima mengonfirmasi (status dikirim -> diterima)
-      allow update: if bolehLokasi(resource.data.ke);
+      allow update: if bolehLokasi(resource.data.ke) || hasRole(['admin']);
       allow delete: if false;
     }
 
     // ---------- Stok ----------
     match /stok/{id} {
+      allow read: if isUser();
+      allow write: if bolehLokasi(request.resource.data.lokasi)
+                   && (resource == null || resource.data.lokasi == request.resource.data.lokasi);
+    }
+    // Stok per-supplier (lot) di Gudang Bahan Baku — dipakai saat memilih asal bahan baku untuk supply ke SP.
+    match /stok_supplier/{id} {
       allow read: if isUser();
       allow write: if bolehLokasi(request.resource.data.lokasi)
                    && (resource == null || resource.data.lokasi == request.resource.data.lokasi);
