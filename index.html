@@ -244,6 +244,7 @@ const ROLES = {
   management: 'Management'
 };
 const KATEGORI = { bahan_baku:'Bahan Baku', hasil_produksi:'Hasil Produksi', ML:'ML (Medium Liner)', limbah:'Limbah' };
+const JENIS_OCC = ['BOX CURAH', 'BOX PRESS', 'BOX BIG PRESS', 'MIX', 'CONES', 'LAMINASI', 'KORAN', 'MURNI LKJ', 'LIPATAN MURNI', 'SOBEKAN ROLL'];
 const LOKASI = { GBB:'Gudang Bahan Baku', SP:'SP', QC:'QC', GR:'Gudang Roll' };
 
 const MODULES = [
@@ -911,12 +912,12 @@ async function pageBarang(el) {
       ${canWrite() ? '<button class="btn btn-pri" id="btnNew">+ Tambah Barang</button>' : ''}
     </div>
     <section class="card"><div class="table-wrap"><table class="tbl" id="tB">
-      <thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Satuan</th><th class="num">Stok min.</th><th>Status</th>${canWrite() ? '<th></th>' : ''}</tr></thead>
-      <tbody>${list.length ? list.map(b => `<tr data-q="${esc((b.kode + ' ' + b.nama).toLowerCase())}" data-k="${esc(b.kategori)}">
-        <td class="mono">${esc(b.kode)}</td><td>${esc(b.nama)}</td><td>${esc(KATEGORI[b.kategori] || b.kategori)}</td><td>${esc(b.satuan)}</td>
+      <thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Jenis</th><th>Satuan</th><th class="num">Stok min.</th><th>Status</th>${canWrite() ? '<th></th>' : ''}</tr></thead>
+      <tbody>${list.length ? list.map(b => `<tr data-q="${esc((b.kode + ' ' + b.nama + ' ' + (b.jenis || '')).toLowerCase())}" data-k="${esc(b.kategori)}">
+        <td class="mono">${esc(b.kode)}</td><td>${esc(b.nama)}</td><td>${esc(KATEGORI[b.kategori] || b.kategori)}</td><td>${esc(b.jenis || '—')}</td><td>${esc(b.satuan)}</td>
         <td class="num">${b.stokMin ? fmtNum(b.stokMin) : '—'}</td>
         <td>${b.aktif !== false ? '<span class="badge b-ok">Aktif</span>' : '<span class="badge b-mute">Nonaktif</span>'}</td>
-        ${canWrite() ? `<td><button class="btn btn-sm" data-edit="${esc(b.kode)}">Edit</button></td>` : ''}</tr>`).join('') : empty(7)}</tbody>
+        ${canWrite() ? `<td><button class="btn btn-sm" data-edit="${esc(b.kode)}">Edit</button></td>` : ''}</tr>`).join('') : empty(8)}</tbody>
     </table></div></section>`;
   const filt = () => {
     const q = $('#qB').value.toLowerCase(), k = $('#kB').value;
@@ -934,6 +935,7 @@ function formBarang(b) {
       <div><label>Kode barang</label><input id="bKode" value="${esc(b.kode || '')}" ${isNew ? '' : 'readonly'} placeholder="mis. BB-006"></div>
       <div><label>Kategori</label><select id="bKat">${Object.entries(KATEGORI).map(([k, v]) => `<option value="${k}" ${b.kategori === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
       <div class="span2"><label>Nama barang</label><input id="bNama" value="${esc(b.nama || '')}"></div>
+      <div><label>Jenis <span class="opt">(opsional, mis. untuk OCC)</span></label><input id="bJenis" list="jenisList" value="${esc(b.jenis || '')}" placeholder="mis. BOX PRESS"><datalist id="jenisList">${JENIS_OCC.map(j => `<option>${j}</option>`).join('')}</datalist></div>
       <div><label>Satuan</label><input id="bSat" list="satuanList" value="${esc(b.satuan || '')}"><datalist id="satuanList"><option>kg</option><option>ton</option><option>roll</option><option>sak</option><option>pcs</option><option>liter</option></datalist></div>
       <div><label>Stok minimum <span class="opt">(untuk peringatan)</span></label><input id="bMin" type="number" min="0" step="any" value="${b.stokMin || ''}"></div>
       <div class="span2"><label class="check"><input type="checkbox" id="bAktif" ${b.aktif !== false ? 'checked' : ''}> Aktif (bisa dipilih di transaksi)</label></div>
@@ -948,7 +950,7 @@ function formBarang(b) {
       if (!nama) throw new Error('Nama barang wajib diisi.');
       if (!satuan) throw new Error('Satuan wajib diisi.');
       if (isNew && await Store.get('master_barang', kode)) throw new Error(`Kode ${kode} sudah dipakai.`);
-      const data = { kode, nama, kategori: $('#bKat').value, satuan, stokMin: r3($('#bMin').value), aktif: $('#bAktif').checked, diubahOleh: ME.nama, diubahPada: nowIso() };
+      const data = { kode, nama, kategori: $('#bKat').value, jenis: $('#bJenis').value.trim(), satuan, stokMin: r3($('#bMin').value), aktif: $('#bAktif').checked, diubahOleh: ME.nama, diubahPada: nowIso() };
       if (isNew) data.dibuatPada = nowIso();
       await Store.set('master_barang', kode, data, true);
       closeModal(); toast(`Barang ${kode} tersimpan.`); go('gbb', 'barang');
@@ -963,7 +965,7 @@ async function pageSupplier(el) {
     <div class="toolbar">
       <input type="search" id="qS" placeholder="Cari kode / nama / kota">
       <div class="spacer"></div>
-      ${canWrite() ? '<button class="btn btn-pri" id="btnNew">+ Tambah Supplier</button>' : ''}
+      ${canWrite() ? '<button class="btn" id="btnImport">Impor Banyak Supplier</button><button class="btn btn-pri" id="btnNew">+ Tambah Supplier</button>' : ''}
     </div>
     <section class="card"><div class="table-wrap"><table class="tbl" id="tS">
       <thead><tr><th>Kode</th><th>Nama</th><th>Alamat</th><th>Telepon</th><th>Kontak</th><th>Status</th>${canWrite() ? '<th></th>' : ''}</tr></thead>
@@ -974,7 +976,42 @@ async function pageSupplier(el) {
     </table></div></section>`;
   $('#qS').oninput = e => { const q = e.target.value.toLowerCase(); el.querySelectorAll('#tS tbody tr[data-q]').forEach(tr => tr.hidden = !tr.dataset.q.includes(q)); };
   const bn = $('#btnNew'); if (bn) bn.onclick = () => formSupplier(null);
+  const bi = $('#btnImport'); if (bi) bi.onclick = () => formImportSupplier(list);
   el.querySelector('#tS').addEventListener('click', e => { const b = e.target.closest('[data-edit]'); if (b) formSupplier(list.find(x => x.kode === b.dataset.edit)); });
+}
+
+function formImportSupplier(existing) {
+  openModal('Impor Banyak Supplier', `
+    <p class="muted" style="font-size:13px;margin:0 0 10px">Tempel daftar nama supplier, satu nama per baris. Nama yang sudah ada di Master Supplier (sama persis, tidak peduli huruf besar/kecil) akan dilewati. Kode supplier dibuat otomatis.</p>
+    <textarea id="impText" rows="12" style="font-family:ui-monospace,monospace" placeholder="LKJ&#10;ANICK&#10;UD. RAJAWALI&#10;..."></textarea>
+    <div id="impErr" class="alert bad" hidden style="margin-top:12px"></div>`,
+    `<button class="btn" data-cancel>Batal</button><button class="btn btn-pri" id="impSave">Impor</button>`);
+  $('#impSave').onclick = async () => {
+    const err = $('#impErr'); err.hidden = true;
+    const btn = $('#impSave');
+    try {
+      const nama_ada = new Set(existing.map(s => s.nama.trim().toLowerCase()));
+      const baris = $('#impText').value.split('\n').map(s => s.trim()).filter(Boolean);
+      const baru = [];
+      for (const nama of baris) {
+        const key = nama.toLowerCase();
+        if (nama_ada.has(key)) continue;
+        nama_ada.add(key);
+        baru.push(nama);
+      }
+      if (!baru.length) throw new Error('Tidak ada nama baru untuk diimpor (semua sudah ada atau kotak kosong).');
+      let n = 0;
+      existing.forEach(s => { const m = /^SUP-(\d+)$/.exec(s.kode); if (m) n = Math.max(n, +m[1]); });
+      btn.disabled = true; btn.textContent = 'Mengimpor…';
+      const now = nowIso();
+      for (const nama of baru) {
+        n += 1;
+        const kode = 'SUP-' + String(n).padStart(3, '0');
+        await Store.set('master_supplier', kode, { kode, nama, alamat: '', telepon: '', kontak: '', aktif: true, dibuatPada: now, diubahOleh: ME.nama, diubahPada: now });
+      }
+      closeModal(); toast(`${baru.length} supplier baru berhasil diimpor.`); go('gbb', 'supplier');
+    } catch (e) { err.hidden = false; err.textContent = e.message; btn.disabled = false; btn.textContent = 'Impor'; }
+  };
 }
 
 function formSupplier(s) {
