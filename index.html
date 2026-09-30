@@ -400,37 +400,52 @@ async function nextNo(t, prefix, tanggal) {
   return { cid, n, noDok: `${prefix}-${ym}-${String(n).padStart(4, '0')}` };
 }
 
-async function simpanPenerimaan(h, items, user = ME) {
+// No. Surat Jalan internal: format OCC/DD/MM/YY/NNN, nomor urut terus berjalan (tidak reset per bulan).
+function dmyShort(tanggal) {
+  const [y, m, d] = tanggal.split('-');
+  return { dd: d, mm: m, yy: y.slice(2) };
+}
+async function nextSJOCC(t, tanggal) {
+  const cid = 'SJ_OCC';
+  const c = await t.get('counter', cid);
+  const n = (c?.last || 0) + 1;
+  const { dd, mm, yy } = dmyShort(tanggal);
+  return { cid, n, noSJ: `OCC/${dd}/${mm}/${yy}/${String(n).padStart(3, '0')}` };
+}
+
+async function simpanPenerimaan(h, item, user = ME) {
   return Store.tx(async t => {
     // --- semua baca dulu ---
     const no = await nextNo(t, 'PBB', h.tanggal);
-    const stok = {};
-    for (const it of items) stok[it.kode] = await t.get('stok', 'GBB_' + it.kode);
+    const sj = await nextSJOCC(t, h.tanggal);
+    const stok = await t.get('stok', 'GBB_' + item.kode);
+    const bruto = r3(item.masuk - item.keluar);
+    if (!(bruto > 0)) throw new Error('Berat keluar harus lebih kecil dari berat masuk.');
+    const netto = r3(bruto * (1 - (item.potongan || 0) / 100));
+    if (!(netto > 0)) throw new Error('Netto harus lebih dari 0. Periksa persen potongan.');
     // --- lalu tulis ---
     const now = nowIso();
     t.set('counter', no.cid, { last: no.n });
+    t.set('counter', sj.cid, { last: sj.n });
     t.set('penerimaan_bb', no.noDok, {
       noDok: no.noDok, tanggal: h.tanggal, supplierKode: h.supplierKode, supplierNama: h.supplierNama,
-      noSJSupplier: h.noSJSupplier || '', noKendaraan: h.noKendaraan || '', catatan: h.catatan || '',
-      items: items.map(({ kode, nama, satuan, qty }) => ({ kode, nama, satuan, qty })),
+      noSJ: sj.noSJ, noKendaraan: h.noKendaraan || '', keterangan: h.keterangan || '',
+      kode: item.kode, nama: item.nama, satuan: item.satuan,
+      beratMasuk: item.masuk, beratKeluar: item.keluar, bruto, potongan: item.potongan || 0, netto,
       dibuatOleh: user.nama, dibuatUid: user.uid, dibuatPada: now
     });
-    for (const it of items) {
-      const saldo = r3((stok[it.kode]?.qty || 0) + it.qty);
-      t.set('stok', 'GBB_' + it.kode, { lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan, qty: saldo, diubahPada: now });
-      t.set('pergerakan_stok', t.newId('pergerakan_stok'), {
-        tanggal: h.tanggal, lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan,
-        jenis: 'masuk', qty: it.qty, saldoSetelah: saldo, refJenis: 'penerimaan_bb', refNo: no.noDok,
-        dibuatOleh: user.nama, dibuatPada: now
-      });
-    }
+    const saldo = r3((stok?.qty || 0) + netto);
+    t.set('stok', 'GBB_' + item.kode, { lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan, qty: saldo, diubahPada: now });
+    t.set('pergerakan_stok', t.newId('pergerakan_stok'), {
+      tanggal: h.tanggal, lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan,
+      jenis: 'masuk', qty: netto, saldoSetelah: saldo, refJenis: 'penerimaan_bb', refNo: no.noDok,
+      dibuatOleh: user.nama, dibuatPada: now
+    });
     // Harga disimpan terpisah: hanya Admin & Management yang bisa membacanya
-    const berharga = items.filter(it => it.harga > 0);
-    if (berharga.length) {
+    if (item.harga > 0) {
       t.set('nilai_penerimaan', no.noDok, {
         noDok: no.noDok, tanggal: h.tanggal, supplierKode: h.supplierKode,
-        items: berharga.map(it => ({ kode: it.kode, qty: it.qty, harga: it.harga, subtotal: Math.round(it.qty * it.harga) })),
-        total: berharga.reduce((s, it) => s + Math.round(it.qty * it.harga), 0),
+        kode: item.kode, netto, harga: item.harga, subtotal: Math.round(netto * item.harga),
         dibuatOleh: user.nama, dibuatPada: now
       });
     }
@@ -488,11 +503,19 @@ async function seedDemo() {
   ];
   for (const s of supp) await Store.set('master_supplier', s.kode, { ...s, aktif: true, dibuatPada: now, diubahOleh: u.nama });
   const hari = n => { const d = new Date(); d.setDate(d.getDate() - n); return localDate(d); };
-  const it = (kode, qty, harga) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, qty, harga }; };
-  await simpanPenerimaan({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noSJSupplier:'SJ-0412', noKendaraan:'D 8123 AB' },
-    [it('BB-001', 42000, 3100), it('BB-003', 18500, 2300)], u);
-  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noSJSupplier:'MK/771', noKendaraan:'T 9021 KL' },
-    [it('BB-002', 25000, 4200), it('BB-004', 1500, 7800), it('BB-005', 400, 16500)], u);
+  // masuk = berat truk isi, keluar = berat truk kosong (tara); bruto = masuk-keluar; netto = bruto setelah potongan %
+  const timb = (kode, masuk, keluar, potongan, harga) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan, harga }; };
+  await simpanPenerimaan({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noKendaraan:'D 8123 AB' },
+    timb('BB-001', 44210, 10000, 3.5, 3100), u);
+  await simpanPenerimaan({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noKendaraan:'D 8123 AB' },
+    timb('BB-003', 20000, 9000, 2, 2300), u);
+  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' },
+    timb('BB-002', 34500, 9200, 3, 4200), u);
+  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' },
+    timb('BB-004', 1500, 0, 0, 7800), u);
+  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' },
+    timb('BB-005', 400, 0, 0, 16500), u);
+  const it = (kode, qty) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, qty }; };
   await simpanPengeluaran({ tanggal: hari(1), catatan:'Supply shift pagi' }, [it('BB-001', 18000), it('BB-003', 6000)], u);
 }
 
@@ -728,17 +751,17 @@ async function pagePenerimaan(el) {
   const list = await Store.list('penerimaan_bb', { order: 'dibuatPada', desc: true });
   el.innerHTML = `
     <div class="toolbar">
-      <input type="search" id="qP" placeholder="Cari no. dokumen / supplier / SJ">
+      <input type="search" id="qP" placeholder="Cari no. dokumen / SJ / supplier / barang">
       <input type="month" id="mP" title="Filter bulan">
       <div class="spacer"></div>
       ${canWrite() ? '<button class="btn btn-pri" id="btnNew">+ Penerimaan Baru</button>' : ''}
     </div>
     <section class="card"><div class="table-wrap"><table class="tbl" id="tP">
-      <thead><tr><th>No. Dokumen</th><th>Tanggal</th><th>Supplier</th><th>No. SJ Supplier</th><th>Kendaraan</th><th class="num">Item</th><th></th></tr></thead>
-      <tbody>${list.length ? list.map(p => `<tr data-q="${esc((p.noDok + ' ' + p.supplierNama + ' ' + p.noSJSupplier).toLowerCase())}" data-m="${esc(p.tanggal.slice(0, 7))}">
-        <td class="mono">${esc(p.noDok)}</td><td>${fmtTgl(p.tanggal)}</td><td>${esc(p.supplierNama)}</td>
-        <td>${esc(p.noSJSupplier || '—')}</td><td>${esc(p.noKendaraan || '—')}</td><td class="num">${p.items.length}</td>
-        <td><button class="btn btn-sm" data-det="${esc(p.noDok)}">Detail</button></td></tr>`).join('') : empty(7)}</tbody>
+      <thead><tr><th>No. Dokumen</th><th>No. Surat Jalan</th><th>Tanggal</th><th>Supplier</th><th>Barang</th><th>Kendaraan</th><th class="num">Netto</th><th></th></tr></thead>
+      <tbody>${list.length ? list.map(p => `<tr data-q="${esc((p.noDok + ' ' + (p.noSJ || '') + ' ' + p.supplierNama + ' ' + p.nama).toLowerCase())}" data-m="${esc(p.tanggal.slice(0, 7))}">
+        <td class="mono">${esc(p.noDok)}</td><td class="mono">${esc(p.noSJ || '—')}</td><td>${fmtTgl(p.tanggal)}</td><td>${esc(p.supplierNama)}</td>
+        <td>${esc(p.nama)}</td><td>${esc(p.noKendaraan || '—')}</td><td class="num">${fmtNum(p.netto)} ${esc(p.satuan)}</td>
+        <td><button class="btn btn-sm" data-det="${esc(p.noDok)}">Detail</button></td></tr>`).join('') : empty(8)}</tbody>
     </table></div></section>`;
   const filt = () => {
     const q = $('#qP').value.toLowerCase(), m = $('#mP').value;
@@ -752,18 +775,17 @@ async function pagePenerimaan(el) {
 async function detailPenerimaan(noDok) {
   const p = await Store.get('penerimaan_bb', noDok);
   const nilai = canSeeHarga() ? await Store.get('nilai_penerimaan', noDok) : null;
-  const hm = {}; (nilai?.items || []).forEach(i => hm[i.kode] = i);
   const withH = canSeeHarga();
   openModal(`Penerimaan ${p.noDok}`, `
-    ${dl([['Tanggal', fmtTgl(p.tanggal)], ['Supplier', esc(p.supplierNama)], ['No. SJ Supplier', esc(p.noSJSupplier || '—')],
+    ${dl([['No. Surat Jalan', esc(p.noSJ || '—')], ['Tanggal', fmtTgl(p.tanggal)], ['Supplier', esc(p.supplierNama)],
           ['No. Kendaraan', esc(p.noKendaraan || '—')], ['Dibuat oleh', esc(p.dibuatOleh)], ['Waktu input', fmtWaktu(p.dibuatPada)]])}
-    ${p.catatan ? `<div class="alert info">${esc(p.catatan)}</div>` : ''}
     <div class="table-wrap"><table class="tbl">
-      <thead><tr><th>Kode</th><th>Barang</th><th class="num">Qty</th><th>Satuan</th>${withH ? '<th class="num">Harga</th><th class="num">Subtotal</th>' : ''}</tr></thead>
-      <tbody>${p.items.map(i => `<tr><td class="mono">${esc(i.kode)}</td><td>${esc(i.nama)}</td><td class="num">${fmtNum(i.qty)}</td><td>${esc(i.satuan)}</td>
-        ${withH ? `<td class="num">${hm[i.kode] ? fmtRp(hm[i.kode].harga) : '<span class="muted">—</span>'}</td><td class="num">${hm[i.kode] ? fmtRp(hm[i.kode].subtotal) : '—'}</td>` : ''}</tr>`).join('')}</tbody>
-      ${withH ? `<tfoot><tr><td colspan="5" class="num">Total</td><td class="num">${nilai ? fmtRp(nilai.total) : '—'}</td></tr></tfoot>` : ''}
-    </table></div>`,
+      <thead><tr><th>Barang</th><th class="num">Berat Masuk</th><th class="num">Berat Keluar</th><th class="num">Bruto</th><th class="num">Potongan</th><th class="num">Netto</th>${withH ? '<th class="num">Harga</th><th class="num">Subtotal</th>' : ''}</tr></thead>
+      <tbody><tr><td>${esc(p.nama)}</td><td class="num">${fmtNum(p.beratMasuk)}</td><td class="num">${fmtNum(p.beratKeluar)}</td>
+        <td class="num">${fmtNum(p.bruto)}</td><td class="num">${p.potongan ? p.potongan + '%' : '—'}</td><td class="num"><b>${fmtNum(p.netto)} ${esc(p.satuan)}</b></td>
+        ${withH ? `<td class="num">${nilai ? fmtRp(nilai.harga) : '<span class="muted">—</span>'}</td><td class="num">${nilai ? fmtRp(nilai.subtotal) : '—'}</td>` : ''}</tr></tbody>
+    </table></div>
+    ${p.keterangan ? `<div class="alert info" style="margin-top:12px">${esc(p.keterangan)}</div>` : ''}`,
     `<button class="btn" data-cancel>Tutup</button><button class="btn btn-pri" id="btnPrint">Cetak</button>`);
   $('#btnPrint').onclick = () => window.print();
 }
@@ -777,35 +799,59 @@ async function formPenerimaan(el) {
     el.innerHTML = `<div class="alert warn">Isi dulu ${!bb.length ? '<b>Master Barang</b> (kategori Bahan Baku)' : ''}${!bb.length && !sp.length ? ' dan ' : ''}${!sp.length ? '<b>Master Supplier</b>' : ''} sebelum membuat penerimaan.</div>`;
     return;
   }
+  const map = Object.fromEntries(bb.map(b => [b.kode, b]));
   el.innerHTML = `
     <section class="card">
       <div class="form-grid">
         <div><label>Tanggal terima</label><input type="date" id="fTgl" value="${todayStr()}" max="${todayStr()}"></div>
         <div><label>Supplier</label><select id="fSup"><option value="">— pilih supplier —</option>${sp.map(s => `<option value="${esc(s.kode)}">${esc(s.nama)}</option>`).join('')}</select></div>
-        <div><label>No. surat jalan supplier</label><input id="fSJ" placeholder="mis. SJ-0412"></div>
         <div><label>No. kendaraan</label><input id="fKend" placeholder="mis. D 1234 AB"></div>
-        <div class="span2"><label>Catatan <span class="opt">(opsional)</span></label><input id="fCat"></div>
+        <div><label>No. surat jalan</label><input value="Dibuat otomatis saat disimpan" disabled></div>
       </div>
-      <h3 class="section-t">Barang diterima</h3>
-      <div id="items"></div>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Harga boleh dikosongkan. Harga hanya bisa dilihat Admin dan Management.</p>
+      <h3 class="section-t">Barang &amp; hasil timbang</h3>
+      <div class="form-grid">
+        <div class="span2"><label>Barang</label><select id="fBarang"><option value="">— pilih barang —</option>${bb.map(b => `<option value="${esc(b.kode)}">${esc(b.kode)} — ${esc(b.nama)}${b.jenis ? ' ('+esc(b.jenis)+')' : ''}</option>`).join('')}</select></div>
+        <div><label>Berat Masuk <span id="fSatM" class="opt"></span></label><input id="fMasuk" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></div>
+        <div><label>Berat Keluar <span id="fSatK" class="opt"></span></label><input id="fKeluar" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></div>
+        <div><label>Potongan <span class="opt">(%, opsional)</span></label><input id="fPot" type="number" min="0" max="100" step="any" inputmode="decimal" placeholder="0"></div>
+        <div><label>Harga / satuan <span class="opt">(opsional)</span></label><input id="fHarga" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></div>
+        <div><label>Bruto <span class="opt">(masuk − keluar)</span></label><input id="fBruto" disabled value="—"></div>
+        <div><label>Netto <span class="opt">(bruto − potongan)</span></label><input id="fNetto" disabled value="—"></div>
+        <div class="span2"><label>Keterangan <span class="opt">(opsional, mis. KTOR, LEMBAB)</span></label><input id="fKet"></div>
+      </div>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Harga boleh dikosongkan. Harga hanya bisa dilihat Admin dan Management. Stok bertambah sebesar Netto.</p>
       <div id="fErr" class="alert bad" hidden style="margin-top:12px"></div>
       <div class="form-foot"><button class="btn" id="fBatal">Batal</button><button class="btn btn-pri" id="fSimpan">Simpan Penerimaan</button></div>
     </section>`;
-  const ed = itemEditor($('#items'), { barang: bb, harga: true });
+  const hitung = () => {
+    const b = map[$('#fBarang').value];
+    $('#fSatM').textContent = $('#fSatK').textContent = b ? `(${b.satuan})` : '';
+    const masuk = +$('#fMasuk').value || 0, keluar = +$('#fKeluar').value || 0, pot = +$('#fPot').value || 0;
+    const bruto = r3(masuk - keluar);
+    $('#fBruto').value = masuk || keluar ? fmtNum(bruto) : '—';
+    $('#fNetto').value = (masuk || keluar) && bruto > 0 ? fmtNum(r3(bruto * (1 - pot / 100))) : '—';
+  };
+  ['fBarang', 'fMasuk', 'fKeluar', 'fPot'].forEach(id => $('#' + id).addEventListener('input', hitung));
   $('#fBatal').onclick = () => go('gbb', 'penerimaan');
   $('#fSimpan').onclick = async () => {
     const err = $('#fErr'); err.hidden = true;
     const btn = $('#fSimpan');
     try {
-      const tanggal = $('#fTgl').value, supKode = $('#fSup').value;
+      const tanggal = $('#fTgl').value, supKode = $('#fSup').value, bKode = $('#fBarang').value;
       if (!tanggal) throw new Error('Tanggal wajib diisi.');
       if (!supKode) throw new Error('Pilih supplier.');
-      const items = ed.get();
+      if (!bKode) throw new Error('Pilih barang.');
+      const b = map[bKode];
+      const masuk = r3($('#fMasuk').value), keluar = r3($('#fKeluar').value || 0), pot = +$('#fPot').value || 0;
+      if (!(masuk > 0)) throw new Error('Berat masuk harus lebih dari 0.');
+      if (keluar >= masuk) throw new Error('Berat keluar harus lebih kecil dari berat masuk.');
+      if (pot < 0 || pot > 100) throw new Error('Potongan harus di antara 0–100%.');
+      const harga = +$('#fHarga').value || 0;
       btn.disabled = true; btn.textContent = 'Menyimpan…';
       const s = sp.find(x => x.kode === supKode);
       const no = await simpanPenerimaan({ tanggal, supplierKode: s.kode, supplierNama: s.nama,
-        noSJSupplier: $('#fSJ').value.trim(), noKendaraan: $('#fKend').value.trim().toUpperCase(), catatan: $('#fCat').value.trim() }, items);
+        noKendaraan: $('#fKend').value.trim().toUpperCase(), keterangan: $('#fKet').value.trim() },
+        { kode: b.kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan: pot, harga });
       toast(`Penerimaan ${no} tersimpan. Stok bertambah.`);
       await go('gbb', 'penerimaan');
       detailPenerimaan(no);
