@@ -1,0 +1,92 @@
+rules_version = '2';
+
+// Aturan keamanan Firestore — Aplikasi Manufacturing ASSA Paper
+// Tempel di Firebase Console > Firestore Database > Rules, lalu Publish.
+//
+// Role (disimpan di users/{uid}.role):
+//   admin, gudang_bb, sp, qc, gudang_roll, management
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Fungsi bantu ----------
+    function signedIn() { return request.auth != null; }
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    function hasRole(roles) { return signedIn() && myRole() in roles; }
+    function isUser() {
+      return hasRole(['admin', 'gudang_bb', 'sp', 'qc', 'gudang_roll', 'management']);
+    }
+    function operasional() {
+      return hasRole(['admin', 'gudang_bb', 'sp', 'qc', 'gudang_roll']);
+    }
+    // Siapa yang boleh mengubah stok di lokasi tertentu
+    function bolehLokasi(lok) {
+      return hasRole(['admin'])
+        || (lok == 'GBB' && hasRole(['gudang_bb']))
+        || (lok == 'SP'  && hasRole(['sp']))
+        || (lok == 'QC'  && hasRole(['qc']))
+        || (lok == 'GR'  && hasRole(['gudang_roll']));
+    }
+
+    // ---------- Pengguna ----------
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || hasRole(['admin']));
+      allow write: if hasRole(['admin']);
+    }
+
+    // ---------- Master data (dipakai bersama) ----------
+    match /master_barang/{kode} {
+      allow read: if isUser();
+      allow create, update: if hasRole(['admin', 'gudang_bb', 'qc']);
+      allow delete: if hasRole(['admin']);
+    }
+    match /master_supplier/{kode} {
+      allow read: if isUser();
+      allow create, update: if hasRole(['admin', 'gudang_bb']);
+      allow delete: if hasRole(['admin']);
+    }
+
+    // ---------- Gudang Bahan Baku ----------
+    // Dokumen transaksi tidak boleh diubah / dihapus setelah disimpan.
+    match /penerimaan_bb/{noDok} {
+      allow read: if hasRole(['admin', 'gudang_bb', 'management']);
+      allow create: if hasRole(['admin', 'gudang_bb']);
+      allow update, delete: if false;
+    }
+    // Harga: Gudang BB boleh mengisi saat penerimaan, tapi tidak bisa membacanya.
+    match /nilai_penerimaan/{noDok} {
+      allow read: if hasRole(['admin', 'management']);
+      allow create: if hasRole(['admin', 'gudang_bb']);
+      allow update: if hasRole(['admin']);
+      allow delete: if false;
+    }
+
+    // ---------- Perpindahan antar divisi ----------
+    match /dokumen_kirim/{noDok} {
+      allow read: if isUser();
+      allow create: if bolehLokasi(request.resource.data.dari);
+      // Divisi penerima mengonfirmasi (status dikirim -> diterima)
+      allow update: if bolehLokasi(resource.data.ke);
+      allow delete: if false;
+    }
+
+    // ---------- Stok ----------
+    match /stok/{id} {
+      allow read: if isUser();
+      allow write: if bolehLokasi(request.resource.data.lokasi)
+                   && (resource == null || resource.data.lokasi == request.resource.data.lokasi);
+    }
+    match /pergerakan_stok/{id} {
+      allow read: if isUser();
+      allow create: if bolehLokasi(request.resource.data.lokasi);
+      allow update, delete: if false;
+    }
+
+    // ---------- Penomoran otomatis ----------
+    match /counter/{id} {
+      allow read, write: if operasional();
+    }
+  }
+}
