@@ -263,7 +263,9 @@ const MODULES = [
   { id:'gr', nama:'Gudang Roll', roles:['admin','gudang_roll','management'], ready:false,
     plan:['Penerimaan ML','Surat Jalan / Input Keluar ML (stok berkurang saat SJ disimpan)','Stok ML','Mutasi ML','Dashboard'] },
   { id:'mgmt', nama:'Laporan Management', roles:['admin','management'], ready:false,
-    plan:['Nilai stok bahan baku (berdasarkan harga penerimaan)','Hasil produksi harian / bulanan / tahunan','Fitur lain menyusul sesuai pembahasan'] }
+    plan:['Nilai stok bahan baku (berdasarkan harga penerimaan)','Hasil produksi harian / bulanan / tahunan','Fitur lain menyusul sesuai pembahasan'] },
+  { id:'report', nama:'Report', roles:['admin','gudang_bb','sp','qc','gudang_roll','management'], ready:false,
+    plan:['Menunggu isi/format laporan ditentukan'] }
 ];
 
 /* ===================== HELPER ===================== */
@@ -273,7 +275,7 @@ const r3 = x => Math.round((+x || 0) * 1000) / 1000;
 const fmtNum = x => (+x || 0).toLocaleString('id-ID', { maximumFractionDigits: 3 });
 const fmtRp = x => 'Rp ' + (+x || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
 const BULAN = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
-const fmtTgl = s => { if (!s) return '—'; const [y,m,d] = s.slice(0,10).split('-'); return `${+d} ${BULAN[+m-1]} ${y}`; };
+const fmtTgl = s => { if (!s) return '—'; const [y,m,d] = s.slice(0,10).split('-'); return `${d}-${BULAN[+m-1]}-${y.slice(2)}`; };
 const fmtWaktu = iso => { if (!iso) return '—'; const d = new Date(iso); return `${fmtTgl(localDate(d))} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
 const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const todayStr = () => localDate();
@@ -418,7 +420,10 @@ async function simpanPenerimaan(h, item, user = ME) {
     // --- semua baca dulu ---
     const no = await nextNo(t, 'PBB', h.tanggal);
     const sj = await nextSJOCC(t, h.tanggal);
-    const stok = await t.get('stok', 'GBB_' + item.kode);
+    const stokId = 'GBB_' + item.kode;
+    const lotId = 'GBB_' + item.kode + '_' + h.supplierKode;
+    const stok = await t.get('stok', stokId);
+    const lot = await t.get('stok_supplier', lotId);
     const bruto = r3(item.masuk - item.keluar);
     if (!(bruto > 0)) throw new Error('Berat keluar harus lebih kecil dari berat masuk.');
     const netto = r3(bruto * (1 - (item.potongan || 0) / 100));
@@ -434,52 +439,88 @@ async function simpanPenerimaan(h, item, user = ME) {
       beratMasuk: item.masuk, beratKeluar: item.keluar, bruto, potongan: item.potongan || 0, netto,
       dibuatOleh: user.nama, dibuatUid: user.uid, dibuatPada: now
     });
+    // Stok agregat (semua supplier digabung) — dipakai untuk dashboard & ringkasan
     const saldo = r3((stok?.qty || 0) + netto);
-    t.set('stok', 'GBB_' + item.kode, { lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan, qty: saldo, diubahPada: now });
+    t.set('stok', stokId, { lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan, qty: saldo, diubahPada: now });
+    // Stok per-supplier (lot) — dipakai saat supply ke SP, agar tercatat asal bahan baku
+    const saldoLot = r3((lot?.qty || 0) + netto);
+    t.set('stok_supplier', lotId, { lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan,
+      supplierKode: h.supplierKode, supplierNama: h.supplierNama, qty: saldoLot, diubahPada: now });
     t.set('pergerakan_stok', t.newId('pergerakan_stok'), {
       tanggal: h.tanggal, lokasi: 'GBB', kodeBarang: item.kode, namaBarang: item.nama, satuan: item.satuan,
       jenis: 'masuk', qty: netto, saldoSetelah: saldo, refJenis: 'penerimaan_bb', refNo: no.noDok,
       dibuatOleh: user.nama, dibuatPada: now
     });
-    // Harga disimpan terpisah: hanya Admin & Management yang bisa membacanya
-    if (item.harga > 0) {
-      t.set('nilai_penerimaan', no.noDok, {
-        noDok: no.noDok, tanggal: h.tanggal, supplierKode: h.supplierKode,
-        kode: item.kode, netto, harga: item.harga, subtotal: Math.round(netto * item.harga),
-        dibuatOleh: user.nama, dibuatPada: now
-      });
-    }
     return no.noDok;
   });
 }
 
+// Harga diisi belakangan oleh Admin (bukan saat input penerimaan). Disimpan terpisah: hanya Admin & Management yang bisa membaca.
+async function simpanHargaPenerimaan(p, harga, user = ME) {
+  return Store.tx(async t => {
+    const now = nowIso();
+    t.set('nilai_penerimaan', p.noDok, {
+      noDok: p.noDok, tanggal: p.tanggal, supplierKode: p.supplierKode,
+      kode: p.kode, netto: p.netto, harga, subtotal: Math.round(p.netto * harga),
+      dibuatOleh: user.nama, dibuatPada: now
+    });
+  });
+}
+
+// Kirim ke SP: TIDAK memotong stok dulu (barang dianggap masih tercatat di Gudang BB
+// sampai SP mengonfirmasi diterima). Hanya divalidasi terhadap stok per-supplier yang tersedia sekarang.
 async function simpanPengeluaran(h, items, user = ME) {
   return Store.tx(async t => {
     const no = await nextNo(t, 'SBB', h.tanggal);
-    const stok = {};
-    for (const it of items) stok[it.kode] = await t.get('stok', 'GBB_' + it.kode);
+    const lot = {};
+    for (const it of items) lot[it.kode + '_' + it.supplierKode] = await t.get('stok_supplier', 'GBB_' + it.kode + '_' + it.supplierKode);
     for (const it of items) {
-      const ada = stok[it.kode]?.qty || 0;
-      if (it.qty > ada) throw new Error(`Stok ${it.nama} tidak cukup. Tersedia ${fmtNum(ada)} ${it.satuan}.`);
+      const ada = lot[it.kode + '_' + it.supplierKode]?.qty || 0;
+      if (it.qty > ada) throw new Error(`Stok ${it.nama} dari ${it.supplierNama} tidak cukup. Tersedia ${fmtNum(ada)} ${it.satuan}.`);
     }
     const now = nowIso();
     t.set('counter', no.cid, { last: no.n });
     t.set('dokumen_kirim', no.noDok, {
       noDok: no.noDok, tanggal: h.tanggal, dari: 'GBB', ke: 'SP', status: 'dikirim', catatan: h.catatan || '',
-      items: items.map(({ kode, nama, satuan, qty }) => ({ kode, nama, satuan, qtyKirim: qty, qtyTerima: null })),
+      items: items.map(({ kode, nama, satuan, qty, supplierKode, supplierNama }) => ({ kode, nama, satuan, qtyKirim: qty, qtyTerima: null, supplierKode, supplierNama })),
       dibuatOleh: user.nama, dibuatUid: user.uid, dibuatPada: now,
       diterimaOleh: null, diterimaPada: null
     });
-    for (const it of items) {
-      const saldo = r3((stok[it.kode]?.qty || 0) - it.qty);
-      t.set('stok', 'GBB_' + it.kode, { lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan, qty: saldo, diubahPada: now });
+    return no.noDok;
+  });
+}
+
+// Dipanggil saat SP mengonfirmasi barang diterima — di sinilah stok Gudang BB benar-benar berkurang.
+async function konfirmasiTerimaSP(noDok, user = ME) {
+  return Store.tx(async t => {
+    const dok = await t.get('dokumen_kirim', noDok);
+    if (!dok) throw new Error('Dokumen tidak ditemukan.');
+    if (dok.status === 'diterima') throw new Error('Dokumen ini sudah dikonfirmasi diterima sebelumnya.');
+    const stokId = it => 'GBB_' + it.kode;
+    const lotId = it => 'GBB_' + it.kode + '_' + it.supplierKode;
+    const stok = {}, lot = {};
+    for (const it of dok.items) { stok[it.kode] = await t.get('stok', stokId(it)); lot[it.kode + '_' + it.supplierKode] = await t.get('stok_supplier', lotId(it)); }
+    for (const it of dok.items) {
+      const adaLot = lot[it.kode + '_' + it.supplierKode]?.qty || 0;
+      if (it.qtyKirim > adaLot) throw new Error(`Stok ${it.nama} dari ${it.supplierNama} sudah tidak cukup (mungkin sudah terpakai di dokumen lain). Tersedia ${fmtNum(adaLot)} ${it.satuan}.`);
+    }
+    const now = nowIso();
+    for (const it of dok.items) {
+      const saldo = r3((stok[it.kode]?.qty || 0) - it.qtyKirim);
+      t.set('stok', stokId(it), { lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan, qty: saldo, diubahPada: now });
+      const saldoLot = r3((lot[it.kode + '_' + it.supplierKode]?.qty || 0) - it.qtyKirim);
+      t.set('stok_supplier', lotId(it), { lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan,
+        supplierKode: it.supplierKode, supplierNama: it.supplierNama, qty: saldoLot, diubahPada: now });
       t.set('pergerakan_stok', t.newId('pergerakan_stok'), {
-        tanggal: h.tanggal, lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan,
-        jenis: 'keluar', qty: it.qty, saldoSetelah: saldo, refJenis: 'dokumen_kirim', refNo: no.noDok,
+        tanggal: dok.tanggal, lokasi: 'GBB', kodeBarang: it.kode, namaBarang: it.nama, satuan: it.satuan,
+        jenis: 'keluar', qty: it.qtyKirim, saldoSetelah: saldo, refJenis: 'dokumen_kirim', refNo: noDok,
         dibuatOleh: user.nama, dibuatPada: now
       });
     }
-    return no.noDok;
+    t.set('dokumen_kirim', noDok, {
+      status: 'diterima', diterimaOleh: user.nama, diterimaPada: now,
+      items: dok.items.map(it => ({ ...it, qtyTerima: it.qtyKirim }))
+    }, true);
   });
 }
 
@@ -504,19 +545,21 @@ async function seedDemo() {
   for (const s of supp) await Store.set('master_supplier', s.kode, { ...s, aktif: true, dibuatPada: now, diubahOleh: u.nama });
   const hari = n => { const d = new Date(); d.setDate(d.getDate() - n); return localDate(d); };
   // masuk = berat truk isi, keluar = berat truk kosong (tara); bruto = masuk-keluar; netto = bruto setelah potongan %
-  const timb = (kode, masuk, keluar, potongan, harga) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan, harga }; };
-  await simpanPenerimaan({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noKendaraan:'D 8123 AB' },
-    timb('BB-001', 44210, 10000, 3.5, 3100), u);
-  await simpanPenerimaan({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noKendaraan:'D 8123 AB' },
-    timb('BB-003', 20000, 9000, 2, 2300), u);
-  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' },
-    timb('BB-002', 34500, 9200, 3, 4200), u);
-  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' },
-    timb('BB-004', 1500, 0, 0, 7800), u);
-  await simpanPenerimaan({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' },
-    timb('BB-005', 400, 0, 0, 16500), u);
-  const it = (kode, qty) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, qty }; };
-  await simpanPengeluaran({ tanggal: hari(1), catatan:'Supply shift pagi' }, [it('BB-001', 18000), it('BB-003', 6000)], u);
+  const timb = (kode, masuk, keluar, potongan) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan }; };
+  const terima = async (h, item, harga) => {
+    const no = await simpanPenerimaan(h, item, u);
+    if (harga) { const p = await Store.get('penerimaan_bb', no); await simpanHargaPenerimaan(p, harga, u); } // contoh: harga diisi Admin belakangan
+    return no;
+  };
+  await terima({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noKendaraan:'D 8123 AB' }, timb('BB-001', 44210, 10000, 3.5), 3100);
+  await terima({ tanggal: hari(5), supplierKode:'SUP-001', supplierNama: supp[0].nama, noKendaraan:'D 8123 AB' }, timb('BB-003', 20000, 9000, 2), 2300);
+  await terima({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' }, timb('BB-002', 34500, 9200, 3), 4200);
+  await terima({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' }, timb('BB-004', 1500, 0, 0), 7800);
+  await terima({ tanggal: hari(3), supplierKode:'SUP-002', supplierNama: supp[1].nama, noKendaraan:'T 9021 KL' }, timb('BB-005', 400, 0, 0), 16500);
+  const it = (kode, qty, supplierKode, supplierNama) => { const b = barang.find(x => x.kode === kode); return { kode, nama: b.nama, satuan: b.satuan, qty, supplierKode, supplierNama }; };
+  const noKirim1 = await simpanPengeluaran({ tanggal: hari(1), catatan:'Supply shift pagi' }, [it('BB-001', 18000, 'SUP-001', supp[0].nama)], u);
+  await konfirmasiTerimaSP(noKirim1, u); // contoh: sudah dikonfirmasi diterima SP -> stok terpotong
+  await simpanPengeluaran({ tanggal: hari(0), catatan:'Supply shift siang' }, [it('BB-003', 6000, 'SUP-001', supp[0].nama)], u); // contoh: masih menunggu diterima SP -> stok belum terpotong
 }
 
 /* ===================== AUTH & SHELL ===================== */
@@ -618,48 +661,54 @@ async function go(modId, page) {
 async function pageDashboard(el) {
   const [barang, stok, terima, kirim, gerak] = await Promise.all([
     Store.list('master_barang'), Store.list('stok'), Store.list('penerimaan_bb'),
-    Store.list('dokumen_kirim'), Store.list('pergerakan_stok', { order: 'dibuatPada', desc: true, limit: 300 })
+    Store.list('dokumen_kirim'), Store.list('pergerakan_stok')
   ]);
   const stokMap = {};
   stok.filter(s => s.lokasi === 'GBB').forEach(s => stokMap[s.kodeBarang] = s.qty);
-  const rows = barang.filter(b => b.kategori === 'bahan_baku' && b.aktif !== false).sort(byKode).map(b => {
-    const q = stokMap[b.kode] || 0, min = +b.stokMin || 0;
-    const st = q <= 0 ? 'habis' : (min && q < min) ? 'menipis' : 'aman';
-    return { ...b, q, min, st };
-  });
-  const bln = todayStr().slice(0, 7);
+  const bahanBaku = barang.filter(b => b.kategori === 'bahan_baku' && b.aktif !== false).sort(byKode);
+  const gerakGBB = gerak.filter(g => g.lokasi === 'GBB');
+  const bln0 = todayStr().slice(0, 7);
   const kirimGbb = kirim.filter(k => k.dari === 'GBB');
   const menunggu = kirimGbb.filter(k => k.status === 'dikirim');
-  const low = rows.filter(r => r.st !== 'aman');
-  const gerakGbb = gerak.filter(g => g.lokasi === 'GBB')
-    .sort((a, b) => (b.tanggal + b.dibuatPada).localeCompare(a.tanggal + a.dibuatPada)).slice(0, 12);
   const stBadge = { aman: '<span class="badge b-ok">Aman</span>', menipis: '<span class="badge b-warn">Menipis</span>', habis: '<span class="badge b-bad">Habis</span>' };
-  const namaBulan = BULAN[+bln.slice(5) - 1] + ' ' + bln.slice(0, 4);
+  const namaBulan = BULAN[+bln0.slice(5) - 1] + ' ' + bln0.slice(0, 4);
+
+  const hitungRows = bln => bahanBaku.map(b => {
+    const sisa = stokMap[b.kode] || 0, min = +b.stokMin || 0;
+    let masuk = 0, keluar = 0;
+    gerakGBB.forEach(g => { if (g.kodeBarang === b.kode && g.tanggal?.startsWith(bln)) { if (g.jenis === 'masuk') masuk += g.qty; else keluar += g.qty; } });
+    masuk = r3(masuk); keluar = r3(keluar);
+    const awal = r3(sisa - masuk + keluar);
+    const st = sisa <= 0 ? 'habis' : (min && sisa < min) ? 'menipis' : 'aman';
+    return { ...b, sisa, min, awal, masuk, keluar, st };
+  });
+  const low = hitungRows(bln0).filter(r => r.st !== 'aman');
+
+  const gerakTerbaru = [...gerakGBB].sort((a, b) => (b.tanggal + b.dibuatPada).localeCompare(a.tanggal + a.dibuatPada)).slice(0, 12);
 
   el.innerHTML = `
     <div class="stats">
-      <div class="stat"><div class="stat-l">Jenis bahan baku aktif</div><div class="stat-v">${rows.length}</div></div>
+      <div class="stat"><div class="stat-l">Jenis bahan baku aktif</div><div class="stat-v">${bahanBaku.length}</div></div>
       <div class="stat ${low.length ? 'warn' : ''}"><div class="stat-l">Stok menipis / habis</div><div class="stat-v">${low.length}</div><div class="stat-s">di bawah stok minimum</div></div>
-      <div class="stat"><div class="stat-l">Penerimaan ${namaBulan}</div><div class="stat-v">${terima.filter(p => p.tanggal?.startsWith(bln)).length}</div><div class="stat-s">dokumen</div></div>
-      <div class="stat"><div class="stat-l">Supply ke SP ${namaBulan}</div><div class="stat-v">${kirimGbb.filter(k => k.tanggal?.startsWith(bln)).length}</div><div class="stat-s">dokumen</div></div>
-      <div class="stat info"><div class="stat-l">Menunggu diterima SP</div><div class="stat-v">${menunggu.length}</div><div class="stat-s">dokumen dalam perjalanan</div></div>
+      <div class="stat"><div class="stat-l">Penerimaan ${namaBulan}</div><div class="stat-v">${terima.filter(p => p.tanggal?.startsWith(bln0)).length}</div><div class="stat-s">dokumen</div></div>
+      <div class="stat"><div class="stat-l">Supply ke SP ${namaBulan}</div><div class="stat-v">${kirimGbb.filter(k => k.tanggal?.startsWith(bln0)).length}</div><div class="stat-s">dokumen</div></div>
+      <div class="stat info"><div class="stat-l">Menunggu diterima SP</div><div class="stat-v">${menunggu.length}</div><div class="stat-s">dokumen belum memotong stok</div></div>
     </div>
     <div class="grid2">
       <section class="card">
-        <div class="card-h"><h3>Stok Bahan Baku</h3><input type="search" id="qStok" placeholder="Cari barang…"></div>
+        <div class="card-h"><h3>Stok Bahan Baku</h3>
+          <input type="month" id="mStok" value="${bln0}" title="Periode Masuk/Keluar">
+          <input type="search" id="qStok" placeholder="Cari barang…"></div>
         <div class="table-wrap"><table class="tbl" id="tStok">
-          <thead><tr><th>Kode</th><th>Nama</th><th class="num">Stok</th><th>Satuan</th><th class="num">Min.</th><th>Status</th></tr></thead>
-          <tbody>${rows.length ? rows.map(r => `<tr data-q="${esc((r.kode + ' ' + r.nama).toLowerCase())}">
-            <td class="mono">${esc(r.kode)}</td><td>${esc(r.nama)}</td><td class="num"><b>${fmtNum(r.q)}</b></td>
-            <td>${esc(r.satuan)}</td><td class="num muted">${r.min ? fmtNum(r.min) : '—'}</td><td>${stBadge[r.st]}</td></tr>`).join('')
-            : empty(6, 'Belum ada bahan baku. Tambahkan di Master Barang.')}</tbody>
+          <thead><tr><th>Kode</th><th>Nama</th><th class="num">Stok Minimal</th><th class="num">Stok Awal</th><th class="num">Masuk</th><th class="num">Keluar</th><th class="num">Sisa Stok</th><th>Status</th></tr></thead>
+          <tbody id="tStokBody"></tbody>
         </table></div>
       </section>
       <section class="card">
         <div class="card-h"><h3>Pergerakan Terakhir</h3></div>
         <div class="table-wrap"><table class="tbl">
-          <thead><tr><th>Tanggal</th><th>Barang</th><th class="num">Qty</th><th class="num">Saldo</th></tr></thead>
-          <tbody>${gerakGbb.length ? gerakGbb.map(g => `<tr>
+          <thead><tr><th>Tanggal</th><th>Barang</th><th class="num">Netto</th><th class="num">Saldo</th></tr></thead>
+          <tbody>${gerakTerbaru.length ? gerakTerbaru.map(g => `<tr>
             <td>${fmtTgl(g.tanggal)}<div class="mono muted">${esc(g.refNo)}</div></td>
             <td>${esc(g.namaBarang)}</td>
             <td class="num ${g.jenis === 'masuk' ? 'in' : 'out'}">${g.jenis === 'masuk' ? '+' : '−'}${fmtNum(g.qty)}</td>
@@ -667,10 +716,23 @@ async function pageDashboard(el) {
         </table></div>
       </section>
     </div>`;
-  $('#qStok').oninput = e => {
-    const q = e.target.value.toLowerCase();
-    el.querySelectorAll('#tStok tbody tr[data-q]').forEach(tr => tr.hidden = !tr.dataset.q.includes(q));
+  const renderBody = () => {
+    const rows = hitungRows($('#mStok').value || bln0);
+    $('#tStokBody').innerHTML = rows.length ? rows.map(r => `<tr data-q="${esc((r.kode + ' ' + r.nama).toLowerCase())}">
+      <td class="mono">${esc(r.kode)}</td><td>${esc(r.nama)}</td>
+      <td class="num muted">${r.min ? fmtNum(r.min) : '—'}</td>
+      <td class="num">${fmtNum(r.awal)}</td>
+      <td class="num in">${r.masuk ? '+' + fmtNum(r.masuk) : '—'}</td>
+      <td class="num out">${r.keluar ? '−' + fmtNum(r.keluar) : '—'}</td>
+      <td class="num"><b>${fmtNum(r.sisa)}</b> ${esc(r.satuan)}</td>
+      <td>${stBadge[r.st]}</td></tr>`).join('')
+      : empty(8, 'Belum ada bahan baku. Tambahkan di Master Barang.');
+    const q = $('#qStok').value.toLowerCase();
+    el.querySelectorAll('#tStokBody tr[data-q]').forEach(tr => tr.hidden = !tr.dataset.q.includes(q));
   };
+  renderBody();
+  $('#mStok').onchange = renderBody;
+  $('#qStok').oninput = renderBody;
 }
 
 /* ===================== EDITOR BARIS BARANG ===================== */
@@ -746,6 +808,72 @@ function itemEditor(host, { barang, harga = false, stok = null }) {
   };
 }
 
+// Editor baris khusus Supply ke SP: tiap baris memilih Barang + Supplier asal (lot),
+// supaya stok yang terpotong nanti tercatat berasal dari supplier yang benar.
+function itemEditorSupply(host, { barang, lotsByKode }) {
+  const map = Object.fromEntries(barang.map(b => [b.kode, b]));
+  host.innerHTML = `<div class="table-wrap"><table class="tbl items">
+    <thead><tr><th style="min-width:210px">Barang</th><th style="min-width:200px">Supplier asal</th><th class="num">Stok tersedia</th><th class="num">Qty</th><th>Satuan</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <button type="button" class="btn btn-ghost" data-add>+ Tambah baris</button>`;
+  const tbody = host.querySelector('tbody');
+  const optsBarang = '<option value="">— pilih barang —</option>' + barang.map(b => `<option value="${esc(b.kode)}">${esc(b.kode)} — ${esc(b.nama)}</option>`).join('');
+  const refresh = tr => {
+    const kode = tr.querySelector('[data-b]').value;
+    const b = map[kode];
+    const lots = kode ? (lotsByKode[kode] || []) : [];
+    const selSup = tr.querySelector('[data-s]');
+    const curSup = selSup.value;
+    selSup.innerHTML = '<option value="">— pilih supplier —</option>' + lots.map(l => `<option value="${esc(l.supplierKode)}">${esc(l.supplierNama)} (tersedia ${fmtNum(l.qty)})</option>`).join('');
+    if (lots.some(l => l.supplierKode === curSup)) selSup.value = curSup;
+    const lot = lots.find(l => l.supplierKode === selSup.value);
+    tr.querySelector('[data-sat]').textContent = b ? b.satuan : '—';
+    tr.querySelector('[data-stok]').textContent = lot ? fmtNum(lot.qty) : '—';
+    const qty = +tr.querySelector('[data-q]').value || 0;
+    tr.classList.toggle('row-err', !!lot && qty > lot.qty);
+  };
+  const add = () => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><select data-b>${optsBarang}</select></td>
+      <td><select data-s><option value="">— pilih barang dulu —</option></select></td>
+      <td class="num" data-stok>—</td>
+      <td class="num"><input data-q type="number" min="0" step="any" inputmode="decimal" placeholder="0"></td>
+      <td data-sat class="muted">—</td>
+      <td><button type="button" class="icon-btn" data-del title="Hapus baris">×</button></td>`;
+    tbody.appendChild(tr);
+    tr.querySelector('[data-b]').addEventListener('change', () => refresh(tr));
+    tr.addEventListener('input', () => refresh(tr));
+    tr.querySelector('[data-del]').onclick = () => { if (tbody.children.length > 1) tr.remove(); };
+  };
+  host.querySelector('[data-add]').onclick = add;
+  add();
+  return {
+    get() {
+      const out = [], seen = new Set();
+      for (const tr of tbody.children) {
+        const kode = tr.querySelector('[data-b]').value;
+        const supplierKode = tr.querySelector('[data-s]').value;
+        const qRaw = tr.querySelector('[data-q]').value;
+        if (!kode && !supplierKode && !qRaw) continue;
+        if (!kode) throw new Error('Ada baris yang barangnya belum dipilih.');
+        if (!supplierKode) throw new Error(`Pilih supplier asal untuk ${map[kode].nama}.`);
+        const key = kode + '_' + supplierKode;
+        if (seen.has(key)) throw new Error(`${map[kode].nama} dari supplier yang sama dipilih lebih dari sekali. Gabungkan dalam satu baris.`);
+        seen.add(key);
+        const b = map[kode], qty = r3(qRaw);
+        if (!(qty > 0)) throw new Error(`Qty ${b.nama} harus lebih dari 0.`);
+        const lot = (lotsByKode[kode] || []).find(l => l.supplierKode === supplierKode);
+        const tersedia = lot?.qty || 0;
+        if (qty > tersedia) throw new Error(`Stok ${b.nama} dari ${lot?.supplierNama || supplierKode} tidak cukup. Tersedia ${fmtNum(tersedia)} ${b.satuan}.`);
+        out.push({ kode, nama: b.nama, satuan: b.satuan, qty, supplierKode, supplierNama: lot.supplierNama });
+      }
+      if (!out.length) throw new Error('Isi minimal satu barang.');
+      return out;
+    }
+  };
+}
+
 /* ===================== HALAMAN: PENERIMAAN ===================== */
 async function pagePenerimaan(el) {
   const list = await Store.list('penerimaan_bb', { order: 'dibuatPada', desc: true });
@@ -776,6 +904,7 @@ async function detailPenerimaan(noDok) {
   const p = await Store.get('penerimaan_bb', noDok);
   const nilai = canSeeHarga() ? await Store.get('nilai_penerimaan', noDok) : null;
   const withH = canSeeHarga();
+  const bisaIsiHarga = ME.role === 'admin';
   openModal(`Penerimaan ${p.noDok}`, `
     ${dl([['No. Surat Jalan', esc(p.noSJ || '—')], ['Tanggal', fmtTgl(p.tanggal)], ['Supplier', esc(p.supplierNama)],
           ['No. Kendaraan', esc(p.noKendaraan || '—')], ['Dibuat oleh', esc(p.dibuatOleh)], ['Waktu input', fmtWaktu(p.dibuatPada)]])}
@@ -783,11 +912,22 @@ async function detailPenerimaan(noDok) {
       <thead><tr><th>Barang</th><th class="num">Berat Masuk</th><th class="num">Berat Keluar</th><th class="num">Bruto</th><th class="num">Potongan</th><th class="num">Netto</th>${withH ? '<th class="num">Harga</th><th class="num">Subtotal</th>' : ''}</tr></thead>
       <tbody><tr><td>${esc(p.nama)}</td><td class="num">${fmtNum(p.beratMasuk)}</td><td class="num">${fmtNum(p.beratKeluar)}</td>
         <td class="num">${fmtNum(p.bruto)}</td><td class="num">${p.potongan ? p.potongan + '%' : '—'}</td><td class="num"><b>${fmtNum(p.netto)} ${esc(p.satuan)}</b></td>
-        ${withH ? `<td class="num">${nilai ? fmtRp(nilai.harga) : '<span class="muted">—</span>'}</td><td class="num">${nilai ? fmtRp(nilai.subtotal) : '—'}</td>` : ''}</tr></tbody>
+        ${withH ? `<td class="num">${nilai ? fmtRp(nilai.harga) : '<span class="muted">Belum diisi</span>'}</td><td class="num">${nilai ? fmtRp(nilai.subtotal) : '—'}</td>` : ''}</tr></tbody>
     </table></div>
-    ${p.keterangan ? `<div class="alert info" style="margin-top:12px">${esc(p.keterangan)}</div>` : ''}`,
+    ${p.keterangan ? `<div class="alert info" style="margin-top:12px">${esc(p.keterangan)}</div>` : ''}
+    ${bisaIsiHarga ? `<div style="margin-top:12px"><label>Harga / satuan <span class="opt">(opsional)</span></label>
+      <div style="display:flex;gap:8px"><input id="dHarga" type="number" min="0" step="any" inputmode="decimal" placeholder="0" value="${nilai ? nilai.harga : ''}">
+      <button class="btn" id="dSimpanHarga" style="white-space:nowrap">${nilai ? 'Ubah Harga' : 'Simpan Harga'}</button></div></div>` : ''}`,
     `<button class="btn" data-cancel>Tutup</button><button class="btn btn-pri" id="btnPrint">Cetak</button>`);
   $('#btnPrint').onclick = () => window.print();
+  const bh = $('#dSimpanHarga');
+  if (bh) bh.onclick = async () => {
+    const h = +$('#dHarga').value || 0;
+    if (!(h > 0)) { toast('Isi harga terlebih dahulu.', 'bad'); return; }
+    bh.disabled = true; bh.textContent = 'Menyimpan…';
+    try { await simpanHargaPenerimaan(p, h); toast('Harga tersimpan.'); closeModal(); detailPenerimaan(noDok); }
+    catch (e) { toast(e.message, 'bad'); bh.disabled = false; bh.textContent = 'Simpan Harga'; }
+  };
 }
 
 async function formPenerimaan(el) {
@@ -814,12 +954,11 @@ async function formPenerimaan(el) {
         <div><label>Berat Masuk <span id="fSatM" class="opt"></span></label><input id="fMasuk" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></div>
         <div><label>Berat Keluar <span id="fSatK" class="opt"></span></label><input id="fKeluar" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></div>
         <div><label>Potongan <span class="opt">(%, opsional)</span></label><input id="fPot" type="number" min="0" max="100" step="any" inputmode="decimal" placeholder="0"></div>
-        <div><label>Harga / satuan <span class="opt">(opsional)</span></label><input id="fHarga" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></div>
         <div><label>Bruto <span class="opt">(masuk − keluar)</span></label><input id="fBruto" disabled value="—"></div>
         <div><label>Netto <span class="opt">(bruto − potongan)</span></label><input id="fNetto" disabled value="—"></div>
         <div class="span2"><label>Keterangan <span class="opt">(opsional, mis. KTOR, LEMBAB)</span></label><input id="fKet"></div>
       </div>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Harga boleh dikosongkan. Harga hanya bisa dilihat Admin dan Management. Stok bertambah sebesar Netto.</p>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Harga diisi belakangan oleh Admin. Stok bertambah sebesar Netto.</p>
       <div id="fErr" class="alert bad" hidden style="margin-top:12px"></div>
       <div class="form-foot"><button class="btn" id="fBatal">Batal</button><button class="btn btn-pri" id="fSimpan">Simpan Penerimaan</button></div>
     </section>`;
@@ -846,12 +985,11 @@ async function formPenerimaan(el) {
       if (!(masuk > 0)) throw new Error('Berat masuk harus lebih dari 0.');
       if (keluar >= masuk) throw new Error('Berat keluar harus lebih kecil dari berat masuk.');
       if (pot < 0 || pot > 100) throw new Error('Potongan harus di antara 0–100%.');
-      const harga = +$('#fHarga').value || 0;
       btn.disabled = true; btn.textContent = 'Menyimpan…';
       const s = sp.find(x => x.kode === supKode);
       const no = await simpanPenerimaan({ tanggal, supplierKode: s.kode, supplierNama: s.nama,
         noKendaraan: $('#fKend').value.trim().toUpperCase(), keterangan: $('#fKet').value.trim() },
-        { kode: b.kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan: pot, harga });
+        { kode: b.kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan: pot });
       toast(`Penerimaan ${no} tersimpan. Stok bertambah.`);
       await go('gbb', 'penerimaan');
       detailPenerimaan(no);
@@ -867,19 +1005,20 @@ const statusKirim = s => s === 'diterima' ? '<span class="badge b-ok">Diterima S
 
 async function pagePengeluaran(el) {
   const list = (await Store.list('dokumen_kirim', { order: 'dibuatPada', desc: true })).filter(k => k.dari === 'GBB');
+  const supplierRingkas = k => [...new Set(k.items.map(i => i.supplierNama))].join(', ');
   el.innerHTML = `
     <div class="toolbar">
-      <input type="search" id="qK" placeholder="Cari no. dokumen">
+      <input type="search" id="qK" placeholder="Cari no. dokumen / supplier">
       <select id="sK"><option value="">Semua status</option><option value="dikirim">Menunggu diterima SP</option><option value="diterima">Diterima SP</option></select>
       <div class="spacer"></div>
       ${canWrite() ? '<button class="btn btn-pri" id="btnNew">+ Supply ke SP</button>' : ''}
     </div>
     <section class="card"><div class="table-wrap"><table class="tbl" id="tK">
-      <thead><tr><th>No. Dokumen</th><th>Tanggal</th><th>Tujuan</th><th class="num">Item</th><th>Status</th><th></th></tr></thead>
-      <tbody>${list.length ? list.map(k => `<tr data-q="${esc(k.noDok.toLowerCase())}" data-s="${esc(k.status)}">
-        <td class="mono">${esc(k.noDok)}</td><td>${fmtTgl(k.tanggal)}</td><td>${esc(LOKASI[k.ke] || k.ke)}</td>
+      <thead><tr><th>No. Dokumen</th><th>Tanggal</th><th>Tujuan</th><th>Bahan baku dari</th><th class="num">Item</th><th>Status</th><th></th></tr></thead>
+      <tbody>${list.length ? list.map(k => `<tr data-q="${esc((k.noDok + ' ' + supplierRingkas(k)).toLowerCase())}" data-s="${esc(k.status)}">
+        <td class="mono">${esc(k.noDok)}</td><td>${fmtTgl(k.tanggal)}</td><td>${esc(LOKASI[k.ke] || k.ke)}</td><td>${esc(supplierRingkas(k))}</td>
         <td class="num">${k.items.length}</td><td>${statusKirim(k.status)}</td>
-        <td><button class="btn btn-sm" data-det="${esc(k.noDok)}">Detail</button></td></tr>`).join('') : empty(6)}</tbody>
+        <td><button class="btn btn-sm" data-det="${esc(k.noDok)}">Detail</button></td></tr>`).join('') : empty(7)}</tbody>
     </table></div></section>`;
   const filt = () => {
     const q = $('#qK').value.toLowerCase(), s = $('#sK').value;
@@ -892,25 +1031,34 @@ async function pagePengeluaran(el) {
 
 async function detailPengeluaran(noDok) {
   const k = await Store.get('dokumen_kirim', noDok);
+  const bisaKonfirmasi = k.status === 'dikirim' && ME.role === 'admin';
   openModal(`Supply ${k.noDok}`, `
     ${dl([['Tanggal', fmtTgl(k.tanggal)], ['Dari', LOKASI[k.dari]], ['Ke', LOKASI[k.ke]], ['Status', statusKirim(k.status)],
           ['Dibuat oleh', esc(k.dibuatOleh)], ['Diterima oleh', k.diterimaOleh ? `${esc(k.diterimaOleh)} · ${fmtWaktu(k.diterimaPada)}` : '—']])}
     ${k.catatan ? `<div class="alert info">${esc(k.catatan)}</div>` : ''}
     <div class="table-wrap"><table class="tbl">
-      <thead><tr><th>Kode</th><th>Barang</th><th class="num">Qty kirim</th><th class="num">Qty terima</th><th>Satuan</th></tr></thead>
-      <tbody>${k.items.map(i => `<tr><td class="mono">${esc(i.kode)}</td><td>${esc(i.nama)}</td><td class="num">${fmtNum(i.qtyKirim)}</td>
+      <thead><tr><th>Kode</th><th>Barang</th><th>Dari Supplier</th><th class="num">Qty kirim</th><th class="num">Qty terima</th><th>Satuan</th></tr></thead>
+      <tbody>${k.items.map(i => `<tr><td class="mono">${esc(i.kode)}</td><td>${esc(i.nama)}</td><td>${esc(i.supplierNama || '—')}</td><td class="num">${fmtNum(i.qtyKirim)}</td>
         <td class="num">${i.qtyTerima == null ? '<span class="muted">—</span>' : fmtNum(i.qtyTerima)}</td><td>${esc(i.satuan)}</td></tr>`).join('')}</tbody>
-    </table></div>`,
-    `<button class="btn" data-cancel>Tutup</button><button class="btn btn-pri" id="btnPrint">Cetak</button>`);
+    </table></div>
+    ${k.status === 'dikirim' ? '<p class="muted" style="font-size:12px;margin-top:10px">Stok Gudang BB belum berkurang untuk dokumen ini — masih menunggu konfirmasi diterima SP.</p>' : ''}
+    ${bisaKonfirmasi ? '<div id="kErr" class="alert bad" hidden style="margin-top:10px"></div>' : ''}`,
+    `<button class="btn" data-cancel>Tutup</button>${bisaKonfirmasi ? '<button class="btn btn-pri" id="btnKonfirmasi">Konfirmasi Diterima SP</button>' : ''}<button class="btn btn-pri" id="btnPrint">Cetak</button>`);
   $('#btnPrint').onclick = () => window.print();
+  const bk = $('#btnKonfirmasi');
+  if (bk) bk.onclick = async () => {
+    bk.disabled = true; bk.textContent = 'Memproses…';
+    try { await konfirmasiTerimaSP(noDok); toast(`${noDok} dikonfirmasi diterima SP. Stok Gudang BB berkurang.`); closeModal(); go('gbb', 'pengeluaran'); }
+    catch (e) { const err = $('#kErr'); err.hidden = false; err.textContent = e.message; bk.disabled = false; bk.textContent = 'Konfirmasi Diterima SP'; }
+  };
 }
 
 async function formPengeluaran(el) {
   if (!canWrite()) return go('gbb', 'pengeluaran');
-  const [barang, stokList] = await Promise.all([Store.list('master_barang'), Store.list('stok')]);
-  const stok = {};
-  stokList.filter(s => s.lokasi === 'GBB').forEach(s => stok[s.kodeBarang] = s.qty);
-  const bb = barang.filter(b => b.kategori === 'bahan_baku' && b.aktif !== false && (stok[b.kode] || 0) > 0).sort(byKode);
+  const [barang, lotList] = await Promise.all([Store.list('master_barang'), Store.list('stok_supplier')]);
+  const lotsByKode = {};
+  lotList.filter(l => l.lokasi === 'GBB' && l.qty > 0).forEach(l => (lotsByKode[l.kodeBarang] ||= []).push(l));
+  const bb = barang.filter(b => b.kategori === 'bahan_baku' && b.aktif !== false && lotsByKode[b.kode]?.length).sort(byKode);
   if (!bb.length) { el.innerHTML = '<div class="alert warn">Belum ada bahan baku dengan stok tersedia.</div>'; return; }
   el.innerHTML = `
     <section class="card">
@@ -921,11 +1069,11 @@ async function formPengeluaran(el) {
       </div>
       <h3 class="section-t">Barang dikirim</h3>
       <div id="items"></div>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Stok Gudang BB langsung berkurang saat disimpan. Dokumen berstatus "Menunggu diterima SP" sampai SP mengonfirmasi penerimaan.</p>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Pilih dari supplier mana bahan baku ini diambil. Stok Gudang BB baru berkurang setelah dikonfirmasi diterima SP.</p>
       <div id="fErr" class="alert bad" hidden style="margin-top:12px"></div>
       <div class="form-foot"><button class="btn" id="fBatal">Batal</button><button class="btn btn-pri" id="fSimpan">Simpan &amp; Kirim ke SP</button></div>
     </section>`;
-  const ed = itemEditor($('#items'), { barang: bb, stok });
+  const ed = itemEditorSupply($('#items'), { barang: bb, lotsByKode });
   $('#fBatal').onclick = () => go('gbb', 'pengeluaran');
   $('#fSimpan').onclick = async () => {
     const err = $('#fErr'); err.hidden = true;
