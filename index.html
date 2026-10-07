@@ -1316,7 +1316,7 @@ async function pageSegera(el, m) {
 }
 
 /* ===================== HALAMAN: REPORT — PENERIMAAN HARIAN ===================== */
-function laporanPenerimaanHTML(tgl, list) {
+function rekapByNama(list) {
   const rekapMap = {};
   let totalBruto = 0, totalNetto = 0;
   list.forEach(p => {
@@ -1325,6 +1325,11 @@ function laporanPenerimaanHTML(tgl, list) {
     r.bruto += p.bruto; r.netto += p.netto;
   });
   const rekap = Object.values(rekapMap).sort((a, b) => a.nama.localeCompare(b.nama));
+  return { rekap, totalBruto, totalNetto };
+}
+
+function laporanPenerimaanHTML(tgl, list) {
+  const { rekap, totalBruto, totalNetto } = rekapByNama(list);
   return `
     <div class="lap-head"><h3 style="margin:0">DATA PENERIMAAN OCC</h3><div>HARI : <b>${fmtHariTanggal(tgl)}</b></div></div>
     <div class="table-wrap"><table class="tbl lap">
@@ -1343,6 +1348,115 @@ function laporanPenerimaanHTML(tgl, list) {
     </table>` : ''}`;
 }
 
+/* ===================== UNDUH PDF (jsPDF + autoTable, dimuat dari CDN saat dipakai) ===================== */
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = () => resolve(); s.onerror = () => reject(new Error('Gagal memuat ' + src));
+    document.head.appendChild(s);
+  });
+}
+let _pdfLibPromise = null;
+function loadPdfLib() {
+  // Dimuat sekali saja (lazy) — baru diunduh browser saat tombol "Unduh PDF" pertama kali diklik.
+  if (!_pdfLibPromise) {
+    _pdfLibPromise = (async () => {
+      if (!window.jspdf) await loadScript('https://cdn.jsdelivr.net/npm/jspdf@4.2.1/dist/jspdf.umd.min.js');
+      if (!window.jspdf.jsPDF.API.autoTable) await loadScript('https://cdn.jsdelivr.net/npm/jspdf-autotable@5.0.8/dist/jspdf.plugin.autotable.min.js');
+      return window.jspdf.jsPDF;
+    })();
+  }
+  return _pdfLibPromise;
+}
+const slug = s => String(s || '').trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-') || 'laporan';
+const WARNA_HEAD = [16, 40, 27]; // hijau gelap, senada dengan brand ASSA Paper
+function pdfJudul(doc, judul, metaLines) {
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text(judul, 40, 36);
+  doc.setDrawColor(210); doc.line(40, 46, doc.internal.pageSize.getWidth() - 40, 46);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+  let y = 64;
+  metaLines.forEach(line => { doc.text(line, 40, y); y += 15; });
+  return y + 8;
+}
+
+async function unduhPdfPenerimaanHarian(tgl, list) {
+  const btn = $('#btnUnduh');
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Menyiapkan PDF…'; }
+    const jsPDF = await loadPdfLib();
+    const { rekap, totalBruto, totalNetto } = rekapByNama(list);
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const y0 = pdfJudul(doc, 'DATA PENERIMAAN OCC', [`HARI : ${fmtHariTanggal(tgl)}`]);
+    doc.autoTable({
+      startY: y0, margin: { left: 40, right: 40 },
+      head: [['No', 'Supplier', 'Nama Barang', 'No Surat Jalan', 'No Mobil', 'Masuk', 'Keluar', 'Potongan', 'Bruto', 'Netto']],
+      body: list.map((p, i) => [i + 1, p.supplierNama, p.nama, p.noSJ || '—', p.noKendaraan || '—',
+        fmtNum(p.beratMasuk), fmtNum(p.beratKeluar), p.potongan ? p.potongan + '%' : '—', fmtNum(p.bruto), fmtNum(p.netto)]),
+      foot: list.length ? [['', '', '', '', '', '', '', 'TOTAL', fmtNum(totalBruto), fmtNum(totalNetto)]] : [],
+      styles: { fontSize: 9, cellPadding: 4, overflow: 'linebreak' },
+      headStyles: { fillColor: WARNA_HEAD }, footStyles: { fillColor: [250, 251, 250], textColor: 20, fontStyle: 'bold' },
+      columnStyles: { 0: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' }, 9: { halign: 'right' } }
+    });
+    if (list.length) {
+      let y1 = doc.lastAutoTable.finalY + 22;
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text('REKAP', 40, y1);
+      doc.autoTable({
+        startY: y1 + 8, margin: { left: 40 }, tableWidth: 280,
+        head: [['Nama Barang', 'Bruto', 'Netto']],
+        body: rekap.map(r => [r.nama, fmtNum(r.bruto), fmtNum(r.netto)]),
+        foot: [['TOTAL', fmtNum(totalBruto), fmtNum(totalNetto)]],
+        styles: { fontSize: 9, cellPadding: 4 }, headStyles: { fillColor: WARNA_HEAD },
+        footStyles: { fillColor: [250, 251, 250], textColor: 20, fontStyle: 'bold' },
+        columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' } }
+      });
+    }
+    doc.save(`Penerimaan-Harian-${tgl}.pdf`);
+  } catch (e) {
+    toast('Gagal membuat PDF — periksa koneksi internet lalu coba lagi.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Unduh PDF'; }
+  }
+}
+
+async function unduhPdfHistoryMobil(meta, perMobil, global) {
+  const btn = $('#hUnduh');
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Menyiapkan PDF…'; }
+    const jsPDF = await loadPdfLib();
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const y0 = pdfJudul(doc, 'HISTORY MUAT MOBIL PER-SUPPLIER', [
+      `PERIODE : ${meta.periode}`, `SUPPLIER : ${meta.supplier}`, `NO. MOBIL : ${meta.mobil}`
+    ]);
+    const pageW = doc.internal.pageSize.getWidth();
+    const left = 40, gap = 16;
+    const half = (pageW - left * 2 - gap) / 2;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('PER NO MOBIL', left, y0);
+    doc.text('GLOBAL', left + half + gap, y0);
+    const yTbl = y0 + 10;
+    const baris = p => [fmtTgl(p.tanggal), p.jenisBarang || p.nama, fmtNum(p.bruto), fmtNum(p.netto), p.potongan ? p.potongan.toFixed(1) + '%' : '—', p.keterangan || '—'];
+    const barisGlobal = p => [fmtTgl(p.tanggal), p.noKendaraan || '—', p.jenisBarang || p.nama, fmtNum(p.bruto), fmtNum(p.netto), p.potongan ? p.potongan.toFixed(1) + '%' : '—', p.keterangan || '—'];
+    doc.autoTable({
+      startY: yTbl, margin: { left }, tableWidth: half,
+      head: [['Tanggal', 'Jenis Bahan Baku', 'Bruto', 'Netto', 'Potongan', 'Keterangan']],
+      body: perMobil.map(baris),
+      styles: { fontSize: 8, cellPadding: 4, overflow: 'linebreak' }, headStyles: { fillColor: WARNA_HEAD }
+    });
+    doc.autoTable({
+      startY: yTbl, margin: { left: left + half + gap }, tableWidth: half,
+      head: [['Tanggal', 'Mobil', 'Jenis Bahan Baku', 'Bruto', 'Netto', 'Potongan', 'Keterangan']],
+      body: global.map(barisGlobal),
+      styles: { fontSize: 8, cellPadding: 4, overflow: 'linebreak' }, headStyles: { fillColor: WARNA_HEAD }
+    });
+    doc.save(`History-Muat-Mobil-${slug(meta.supplier)}${meta.mobil !== 'Semua' ? '-' + slug(meta.mobil) : ''}.pdf`);
+  } catch (e) {
+    toast('Gagal membuat PDF — periksa koneksi internet lalu coba lagi.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Unduh PDF'; }
+  }
+}
+
 async function ambilPenerimaanHarian(tgl) {
   return (await Store.list('penerimaan_bb')).filter(p => p.tanggal === tgl)
     .sort((a, b) => (a.dibuatPada || '').localeCompare(b.dibuatPada || ''));
@@ -1354,6 +1468,7 @@ async function pageReportPenerimaanHarian(el) {
     <div class="toolbar">
       <label class="muted" style="font-size:12px">Tanggal <input type="date" id="rTgl" value="${tgl0}" max="${todayStr()}" style="width:auto;display:inline-block"></label>
       <div class="spacer"></div>
+      <button class="btn" id="btnUnduh">Unduh PDF</button>
       <button class="btn btn-pri" id="btnCetak">Cetak</button>
     </div>
     <section class="card" id="rHost"></section>`;
@@ -1363,6 +1478,10 @@ async function pageReportPenerimaanHarian(el) {
     $('#rHost').innerHTML = laporanPenerimaanHTML(tgl, await ambilPenerimaanHarian(tgl));
   };
   $('#rTgl').onchange = render;
+  $('#btnUnduh').onclick = async () => {
+    const tgl = $('#rTgl').value || tgl0;
+    unduhPdfPenerimaanHarian(tgl, await ambilPenerimaanHarian(tgl));
+  };
   $('#btnCetak').onclick = async () => {
     const tgl = $('#rTgl').value || tgl0;
     openModal(`Laporan Penerimaan ${fmtTgl(tgl)}`, laporanPenerimaanHTML(tgl, await ambilPenerimaanHarian(tgl)),
@@ -1413,6 +1532,7 @@ async function pageReportHistoryMuatMobil(el) {
           <select id="hMobil" style="width:auto;display:inline-block" disabled><option value="">— pilih supplier dulu —</option></select>
         </label>
         <div class="spacer"></div>
+        <button class="btn" id="hUnduh">Unduh PDF</button>
         <button class="btn btn-pri" id="hCetak">Cetak</button>
       </div>
       ${!supp.length ? '<div class="alert warn">Isi dulu <b>Master Supplier</b> sebelum memakai laporan ini.</div>' : ''}
@@ -1430,12 +1550,19 @@ async function pageReportHistoryMuatMobil(el) {
     selMobil.innerHTML = '<option value="">— semua mobil (lihat tabel Global) —</option>' + daftar.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
   };
 
-  const render = async () => {
+  // Kumpulkan filter + data saat ini — dipakai bersama oleh tampilan layar, Cetak, dan Unduh PDF
+  const ambilFilterSekarang = async () => {
     const dari = $('#hDari').value, sampai = $('#hSampai').value, supKode = $('#hSup').value, mobil = $('#hMobil').value;
+    const sNama = supp.find(s => s.kode === supKode)?.nama || '—';
+    const list = supKode ? await ambilHistoryMuatMobil(dari, sampai, supKode) : [];
+    const perMobil = mobil ? list.filter(p => (p.noKendaraan || '') === mobil) : [];
+    return { dari, sampai, supKode, sNama, mobil, list, perMobil };
+  };
+
+  const render = async () => {
+    const { supKode, mobil, list, perMobil } = await ambilFilterSekarang();
     if (!supKode) { $('#hHost').innerHTML = '<section class="card" style="grid-column:1/-1"><p class="muted" style="margin:0">Pilih supplier untuk menampilkan history.</p></section>'; return; }
     $('#hHost').innerHTML = '<div class="loading">Memuat data…</div>';
-    const list = await ambilHistoryMuatMobil(dari, sampai, supKode);
-    const perMobil = mobil ? list.filter(p => (p.noKendaraan || '') === mobil) : [];
     $('#hHost').innerHTML =
       tabelHistoryHTML('HISTORY MUAT MOBIL PER-SUPPLIER (PER NO MOBIL)', perMobil, false, mobil ? undefined : 'Pilih No. Mobil dulu untuk menampilkan tabel ini.') +
       tabelHistoryHTML('HISTORY MUAT MOBIL PER-SUPPLIER (GLOBAL)', list, true);
@@ -1444,12 +1571,15 @@ async function pageReportHistoryMuatMobil(el) {
   $('#hSup').onchange = async () => { await isiMobil(); render(); };
   $('#hDari').onchange = render; $('#hSampai').onchange = render; $('#hMobil').onchange = render;
 
-  $('#hCetak').onclick = async () => {
-    const dari = $('#hDari').value, sampai = $('#hSampai').value, supKode = $('#hSup').value, mobil = $('#hMobil').value;
+  $('#hUnduh').onclick = async () => {
+    const { supKode, dari, sampai, sNama, mobil, perMobil, list } = await ambilFilterSekarang();
     if (!supKode) { toast('Pilih supplier dulu.'); return; }
-    const sNama = supp.find(s => s.kode === supKode)?.nama || '—';
-    const list = await ambilHistoryMuatMobil(dari, sampai, supKode);
-    const perMobil = mobil ? list.filter(p => (p.noKendaraan || '') === mobil) : [];
+    unduhPdfHistoryMobil({ periode: `${fmtTgl(dari)} s/d ${fmtTgl(sampai)}`, supplier: sNama, mobil: mobil || 'Semua' }, perMobil, list);
+  };
+
+  $('#hCetak').onclick = async () => {
+    const { supKode, dari, sampai, sNama, mobil, perMobil, list } = await ambilFilterSekarang();
+    if (!supKode) { toast('Pilih supplier dulu.'); return; }
     const body = `<div class="lap-head">
         <div>PERIODE : <b>${fmtTgl(dari)} s/d ${fmtTgl(sampai)}</b></div>
         <div>SUPPLIER : <b>${esc(sNama)}</b></div>
