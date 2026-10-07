@@ -141,9 +141,13 @@ main{min-width:0;display:flex;flex-direction:column}
 .dl dd{margin:0;font-weight:600}
 .plan{margin:8px 0 0;padding-left:18px}
 .lap-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.lap-head>div{font-size:13px}
 .tbl.lap th,.tbl.lap td{border:1px solid var(--line)}
 .tbl.lap thead th{background:#fafbfa}
 .tbl.lap tfoot td{background:#fafbfa}
+.grid2-eq{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+.grid2-eq .card{margin-bottom:0;min-width:0}
+@media (max-width:980px){ .grid2-eq{grid-template-columns:minmax(0,1fr)} }
 .plan li{margin:4px 0}
 
 /* Toast */
@@ -176,6 +180,11 @@ main{min-width:0;display:flex;flex-direction:column}
   /* Jangan biarkan kotak/tabel terpotong oleh scroll — buka lebar penuh saat dicetak */
   .modal-b{overflow:visible!important}
   .table-wrap{overflow:visible!important}
+  /* Dua tabel tetap berdampingan saat dicetak (lebar halaman landscape pas di breakpoint mobile) */
+  .grid2-eq,.grid2{grid-template-columns:1fr 1fr!important}
+  /* Saat 2 tabel berdampingan, kunci lebar supaya teks membungkus (wrap) di dalam kolomnya sendiri — bukan terpotong di tepi halaman */
+  .grid2-eq .tbl.lap,.grid2 .tbl.lap{table-layout:fixed;width:100%}
+  .grid2-eq .tbl.lap td,.grid2-eq .tbl.lap th,.grid2 .tbl.lap td,.grid2 .tbl.lap th{white-space:normal!important;word-break:break-word}
   .tbl{font-size:11px}
   .tbl th,.tbl td{padding:4px 6px}
   .tbl.lap tr{break-inside:avoid;page-break-inside:avoid}
@@ -278,7 +287,8 @@ const MODULES = [
   { id:'report', nama:'Report', roles:['admin','gudang_bb','sp','qc','gudang_roll','management'], ready:true,
     writers:['admin','gudang_bb','sp','qc','gudang_roll','management'], // laporan: semua role yang bisa akses boleh "pakai" (pilih tanggal, cetak) — bukan menulis data
     menu:[
-      { id:'penerimaan-harian', label:'Penerimaan Harian' }
+      { id:'penerimaan-harian', label:'Penerimaan Harian' },
+      { id:'history-mobil', label:'History Muat Mobil per-Supplier' }
     ]}
 ];
 
@@ -300,6 +310,7 @@ const nowIso = () => new Date().toISOString();
 const byKode = (a, b) => String(a.kode).localeCompare(String(b.kode));
 const empty = (cols, msg='Belum ada data') => `<tr><td colspan="${cols}" class="empty">${msg}</td></tr>`;
 const dl = pairs => `<dl class="dl">${pairs.map(([k,v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
+const dlmRentang = (tgl, dari, sampai) => tgl && (!dari || tgl >= dari) && (!sampai || tgl <= sampai);
 
 function toast(msg, type='') {
   const t = document.createElement('div');
@@ -452,7 +463,7 @@ async function simpanPenerimaan(h, item, user = ME) {
     t.set('penerimaan_bb', no.noDok, {
       noDok: no.noDok, tanggal: h.tanggal, supplierKode: h.supplierKode, supplierNama: h.supplierNama,
       noSJ: sj.noSJ, noKendaraan: h.noKendaraan || '', keterangan: h.keterangan || '',
-      kode: item.kode, nama: item.nama, satuan: item.satuan,
+      kode: item.kode, nama: item.nama, jenisBarang: item.jenis || '', satuan: item.satuan,
       beratMasuk: item.masuk, beratKeluar: item.keluar, bruto, potongan: item.potongan || 0, netto,
       dibuatOleh: user.nama, dibuatUid: user.uid, dibuatPada: now
     });
@@ -1047,7 +1058,7 @@ async function formPenerimaan(el) {
       const s = sp.find(x => x.kode === supKode);
       const no = await simpanPenerimaan({ tanggal, supplierKode: s.kode, supplierNama: s.nama,
         noKendaraan: $('#fKend').value.trim().toUpperCase(), keterangan: $('#fKet').value.trim() },
-        { kode: b.kode, nama: b.nama, satuan: b.satuan, masuk, keluar, potongan: pot });
+        { kode: b.kode, nama: b.nama, jenis: b.jenis || '', satuan: b.satuan, masuk, keluar, potongan: pot });
       toast(`Penerimaan ${no} tersimpan. Stok bertambah.`);
       await go('gbb', 'penerimaan');
       detailPenerimaan(no);
@@ -1361,12 +1372,107 @@ async function pageReportPenerimaanHarian(el) {
   render();
 }
 
+/* ===================== HALAMAN: REPORT — HISTORY MUAT MOBIL PER-SUPPLIER ===================== */
+function tabelHistoryHTML(title, list, withMobil, pesanKosong) {
+  const cols = withMobil
+    ? [['Tanggal',0],['Mobil',0],['Jenis Bahan Baku (OCC)',0],['Bruto',1],['Netto',1],['Potongan',1],['Keterangan',0]]
+    : [['Tanggal',0],['Jenis Bahan Baku (OCC)',0],['Bruto',1],['Netto',1],['Potongan',1],['Keterangan',0]];
+  const baris = p => `<tr><td>${fmtTgl(p.tanggal)}</td>${withMobil ? `<td class="mono">${esc(p.noKendaraan || '—')}</td>` : ''}
+    <td>${esc(p.jenisBarang || p.nama)}</td><td class="num">${fmtNum(p.bruto)}</td><td class="num">${fmtNum(p.netto)}</td>
+    <td class="num">${p.potongan ? p.potongan.toFixed(1) + ' %' : '—'}</td><td>${esc(p.keterangan || '—')}</td></tr>`;
+  return `<section class="card">
+    <h3 style="margin:0 0 12px;font-size:15px">${esc(title)}</h3>
+    <div class="table-wrap"><table class="tbl lap">
+      <thead><tr>${cols.map(([c,n]) => `<th${n ? ' class="num"' : ''}>${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${list.length ? list.map(baris).join('') : empty(cols.length, pesanKosong || 'Tidak ada data pada filter ini.')}</tbody>
+    </table></div>
+  </section>`;
+}
+
+async function ambilHistoryMuatMobil(dari, sampai, supplierKode) {
+  const all = await Store.list('penerimaan_bb');
+  return all.filter(p => p.supplierKode === supplierKode && dlmRentang(p.tanggal, dari, sampai))
+    .sort((a, b) => a.tanggal === b.tanggal ? (a.dibuatPada || '').localeCompare(b.dibuatPada || '') : a.tanggal.localeCompare(b.tanggal));
+}
+
+async function pageReportHistoryMuatMobil(el) {
+  const supp = (await Store.list('master_supplier')).filter(s => s.aktif !== false).sort(byKode);
+  const d0 = new Date(); const dari0 = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-01`;
+  el.innerHTML = `
+    <section class="card">
+      <div class="toolbar">
+        <label class="muted" style="font-size:12px">Periode
+          <input type="date" id="hDari" value="${dari0}" style="width:auto;display:inline-block">
+          s/d
+          <input type="date" id="hSampai" value="${todayStr()}" max="${todayStr()}" style="width:auto;display:inline-block">
+        </label>
+        <label class="muted" style="font-size:12px">Supplier
+          <select id="hSup" style="width:auto;display:inline-block"><option value="">— pilih supplier —</option>${supp.map(s => `<option value="${esc(s.kode)}">${esc(s.nama)}</option>`).join('')}</select>
+        </label>
+        <label class="muted" style="font-size:12px">No. Mobil
+          <select id="hMobil" style="width:auto;display:inline-block" disabled><option value="">— pilih supplier dulu —</option></select>
+        </label>
+        <div class="spacer"></div>
+        <button class="btn btn-pri" id="hCetak">Cetak</button>
+      </div>
+      ${!supp.length ? '<div class="alert warn">Isi dulu <b>Master Supplier</b> sebelum memakai laporan ini.</div>' : ''}
+    </section>
+    <div class="grid2-eq" id="hHost"></div>`;
+  if (!supp.length) return;
+
+  const isiMobil = async () => {
+    const supKode = $('#hSup').value;
+    const selMobil = $('#hMobil');
+    if (!supKode) { selMobil.innerHTML = '<option value="">— pilih supplier dulu —</option>'; selMobil.disabled = true; return; }
+    const all = await Store.list('penerimaan_bb');
+    const daftar = [...new Set(all.filter(p => p.supplierKode === supKode && p.noKendaraan).map(p => p.noKendaraan))].sort();
+    selMobil.disabled = false;
+    selMobil.innerHTML = '<option value="">— semua mobil (lihat tabel Global) —</option>' + daftar.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  };
+
+  const render = async () => {
+    const dari = $('#hDari').value, sampai = $('#hSampai').value, supKode = $('#hSup').value, mobil = $('#hMobil').value;
+    if (!supKode) { $('#hHost').innerHTML = '<section class="card" style="grid-column:1/-1"><p class="muted" style="margin:0">Pilih supplier untuk menampilkan history.</p></section>'; return; }
+    $('#hHost').innerHTML = '<div class="loading">Memuat data…</div>';
+    const list = await ambilHistoryMuatMobil(dari, sampai, supKode);
+    const perMobil = mobil ? list.filter(p => (p.noKendaraan || '') === mobil) : [];
+    $('#hHost').innerHTML =
+      tabelHistoryHTML('HISTORY MUAT MOBIL PER-SUPPLIER (PER NO MOBIL)', perMobil, false, mobil ? undefined : 'Pilih No. Mobil dulu untuk menampilkan tabel ini.') +
+      tabelHistoryHTML('HISTORY MUAT MOBIL PER-SUPPLIER (GLOBAL)', list, true);
+  };
+
+  $('#hSup').onchange = async () => { await isiMobil(); render(); };
+  $('#hDari').onchange = render; $('#hSampai').onchange = render; $('#hMobil').onchange = render;
+
+  $('#hCetak').onclick = async () => {
+    const dari = $('#hDari').value, sampai = $('#hSampai').value, supKode = $('#hSup').value, mobil = $('#hMobil').value;
+    if (!supKode) { toast('Pilih supplier dulu.'); return; }
+    const sNama = supp.find(s => s.kode === supKode)?.nama || '—';
+    const list = await ambilHistoryMuatMobil(dari, sampai, supKode);
+    const perMobil = mobil ? list.filter(p => (p.noKendaraan || '') === mobil) : [];
+    const body = `<div class="lap-head">
+        <div>PERIODE : <b>${fmtTgl(dari)} s/d ${fmtTgl(sampai)}</b></div>
+        <div>SUPPLIER : <b>${esc(sNama)}</b></div>
+        <div>NO. MOBIL : <b>${mobil ? esc(mobil) : 'Semua'}</b></div>
+      </div>
+      <div class="grid2-eq">
+        ${tabelHistoryHTML('HISTORY MUAT MOBIL PER-SUPPLIER (PER NO MOBIL)', perMobil, false, mobil ? undefined : 'Pilih No. Mobil dulu untuk menampilkan tabel ini.')}
+        ${tabelHistoryHTML('HISTORY MUAT MOBIL PER-SUPPLIER (GLOBAL)', list, true)}
+      </div>`;
+    openModal(`History Muat Mobil — ${esc(sNama)}`, body, `<button class="btn" data-cancel>Tutup</button><button class="btn btn-pri" id="btnPrintH">Cetak</button>`);
+    $('#btnPrintH').onclick = () => window.print();
+  };
+
+  render();
+}
+
 const PAGES = {
   dashboard: pageDashboard,
   penerimaan: pagePenerimaan, 'penerimaan-baru': formPenerimaan,
   pengeluaran: pagePengeluaran, 'pengeluaran-baru': formPengeluaran,
   barang: pageBarang, supplier: pageSupplier, segera: pageSegera,
-  'penerimaan-harian': pageReportPenerimaanHarian
+  'penerimaan-harian': pageReportPenerimaanHarian,
+  'history-mobil': pageReportHistoryMuatMobil
 };
 
 /* ===================== MULAI ===================== */
