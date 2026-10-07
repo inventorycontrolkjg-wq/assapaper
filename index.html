@@ -167,11 +167,18 @@ main{min-width:0;display:flex;flex-direction:column}
 }
 
 /* Print: hanya isi modal */
+@page{size:landscape;margin:10mm}
 @media print{
   body>*:not(#modal-root){display:none!important}
   .modal-bg{position:static;background:none;padding:0}
-  .modal{box-shadow:none;max-height:none}
+  .modal{box-shadow:none;max-height:none;max-width:none!important;width:100%!important}
   .modal-f,.modal-h .icon-btn{display:none}
+  /* Jangan biarkan kotak/tabel terpotong oleh scroll — buka lebar penuh saat dicetak */
+  .modal-b{overflow:visible!important}
+  .table-wrap{overflow:visible!important}
+  .tbl{font-size:11px}
+  .tbl th,.tbl td{padding:4px 6px}
+  .tbl.lap tr{break-inside:avoid;page-break-inside:avoid}
 }
 </style>
 </head>
