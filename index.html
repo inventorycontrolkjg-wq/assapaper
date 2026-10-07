@@ -140,6 +140,10 @@ main{min-width:0;display:flex;flex-direction:column}
 .dl dt{font-size:12px;color:var(--muted)}
 .dl dd{margin:0;font-weight:600}
 .plan{margin:8px 0 0;padding-left:18px}
+.lap-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.tbl.lap th,.tbl.lap td{border:1px solid var(--line)}
+.tbl.lap thead th{background:#fafbfa}
+.tbl.lap tfoot td{background:#fafbfa}
 .plan li{margin:4px 0}
 
 /* Toast */
@@ -264,8 +268,11 @@ const MODULES = [
     plan:['Penerimaan ML','Surat Jalan / Input Keluar ML (stok berkurang saat SJ disimpan)','Stok ML','Mutasi ML','Dashboard'] },
   { id:'mgmt', nama:'Laporan Management', roles:['admin','management'], ready:false,
     plan:['Nilai stok bahan baku (berdasarkan harga penerimaan)','Hasil produksi harian / bulanan / tahunan','Fitur lain menyusul sesuai pembahasan'] },
-  { id:'report', nama:'Report', roles:['admin','gudang_bb','sp','qc','gudang_roll','management'], ready:false,
-    plan:['Menunggu isi/format laporan ditentukan'] }
+  { id:'report', nama:'Report', roles:['admin','gudang_bb','sp','qc','gudang_roll','management'], ready:true,
+    writers:['admin','gudang_bb','sp','qc','gudang_roll','management'], // laporan: semua role yang bisa akses boleh "pakai" (pilih tanggal, cetak) — bukan menulis data
+    menu:[
+      { id:'penerimaan-harian', label:'Penerimaan Harian' }
+    ]}
 ];
 
 /* ===================== HELPER ===================== */
@@ -275,7 +282,10 @@ const r3 = x => Math.round((+x || 0) * 1000) / 1000;
 const fmtNum = x => (+x || 0).toLocaleString('id-ID', { maximumFractionDigits: 3 });
 const fmtRp = x => 'Rp ' + (+x || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
 const BULAN = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+const BULAN_PANJANG = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+const HARI_ID = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
 const fmtTgl = s => { if (!s) return '—'; const [y,m,d] = s.slice(0,10).split('-'); return `${d}-${BULAN[+m-1]}-${y.slice(2)}`; };
+const fmtHariTanggal = s => { if (!s) return '—'; const [y,m,d] = s.slice(0,10).split('-'); const dt = new Date(+y, +m-1, +d); return `${HARI_ID[dt.getDay()]}, ${d} ${BULAN_PANJANG[+m-1]} ${y}`; };
 const fmtWaktu = iso => { if (!iso) return '—'; const d = new Date(iso); return `${fmtTgl(localDate(d))} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
 const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const todayStr = () => localDate();
@@ -1287,11 +1297,69 @@ async function pageSegera(el, m) {
   </section>`;
 }
 
+/* ===================== HALAMAN: REPORT — PENERIMAAN HARIAN ===================== */
+function laporanPenerimaanHTML(tgl, list) {
+  const rekapMap = {};
+  let totalBruto = 0, totalNetto = 0;
+  list.forEach(p => {
+    totalBruto += p.bruto; totalNetto += p.netto;
+    const r = rekapMap[p.nama] || (rekapMap[p.nama] = { nama: p.nama, bruto: 0, netto: 0 });
+    r.bruto += p.bruto; r.netto += p.netto;
+  });
+  const rekap = Object.values(rekapMap).sort((a, b) => a.nama.localeCompare(b.nama));
+  return `
+    <div class="lap-head"><h3 style="margin:0">DATA PENERIMAAN OCC</h3><div>HARI : <b>${fmtHariTanggal(tgl)}</b></div></div>
+    <div class="table-wrap"><table class="tbl lap">
+      <thead><tr><th>No</th><th>Supplier</th><th>Nama Barang</th><th>No Surat Jalan</th><th>No Mobil</th><th class="num">Masuk</th><th class="num">Keluar</th><th class="num">Potongan</th><th class="num">Bruto</th><th class="num">Netto</th></tr></thead>
+      <tbody>${list.length ? list.map((p, i) => `<tr><td class="num">${i + 1}</td><td>${esc(p.supplierNama)}</td><td>${esc(p.nama)}</td>
+        <td class="mono">${esc(p.noSJ || '—')}</td><td>${esc(p.noKendaraan || '—')}</td>
+        <td class="num">${fmtNum(p.beratMasuk)}</td><td class="num">${fmtNum(p.beratKeluar)}</td><td class="num">${p.potongan ? p.potongan + '%' : '—'}</td>
+        <td class="num">${fmtNum(p.bruto)}</td><td class="num">${fmtNum(p.netto)}</td></tr>`).join('') : empty(10, 'Tidak ada penerimaan pada tanggal ini.')}</tbody>
+      ${list.length ? `<tfoot><tr><td colspan="8" class="num">TOTAL</td><td class="num">${fmtNum(totalBruto)}</td><td class="num">${fmtNum(totalNetto)}</td></tr></tfoot>` : ''}
+    </table></div>
+    ${list.length ? `<h3 style="margin:20px 0 10px">REKAP</h3>
+    <table class="tbl lap" style="max-width:420px">
+      <thead><tr><th>Nama Barang</th><th class="num">Bruto</th><th class="num">Netto</th></tr></thead>
+      <tbody>${rekap.map(r => `<tr><td>${esc(r.nama)}</td><td class="num">${fmtNum(r.bruto)}</td><td class="num">${fmtNum(r.netto)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td><b>TOTAL</b></td><td class="num"><b>${fmtNum(totalBruto)}</b></td><td class="num"><b>${fmtNum(totalNetto)}</b></td></tr></tfoot>
+    </table>` : ''}`;
+}
+
+async function ambilPenerimaanHarian(tgl) {
+  return (await Store.list('penerimaan_bb')).filter(p => p.tanggal === tgl)
+    .sort((a, b) => (a.dibuatPada || '').localeCompare(b.dibuatPada || ''));
+}
+
+async function pageReportPenerimaanHarian(el) {
+  const tgl0 = todayStr();
+  el.innerHTML = `
+    <div class="toolbar">
+      <label class="muted" style="font-size:12px">Tanggal <input type="date" id="rTgl" value="${tgl0}" max="${todayStr()}" style="width:auto;display:inline-block"></label>
+      <div class="spacer"></div>
+      <button class="btn btn-pri" id="btnCetak">Cetak</button>
+    </div>
+    <section class="card" id="rHost"></section>`;
+  const render = async () => {
+    const tgl = $('#rTgl').value || tgl0;
+    $('#rHost').innerHTML = '<div class="loading">Memuat data…</div>';
+    $('#rHost').innerHTML = laporanPenerimaanHTML(tgl, await ambilPenerimaanHarian(tgl));
+  };
+  $('#rTgl').onchange = render;
+  $('#btnCetak').onclick = async () => {
+    const tgl = $('#rTgl').value || tgl0;
+    openModal(`Laporan Penerimaan ${fmtTgl(tgl)}`, laporanPenerimaanHTML(tgl, await ambilPenerimaanHarian(tgl)),
+      `<button class="btn" data-cancel>Tutup</button><button class="btn btn-pri" id="btnPrint2">Cetak</button>`);
+    $('#btnPrint2').onclick = () => window.print();
+  };
+  render();
+}
+
 const PAGES = {
   dashboard: pageDashboard,
   penerimaan: pagePenerimaan, 'penerimaan-baru': formPenerimaan,
   pengeluaran: pagePengeluaran, 'pengeluaran-baru': formPengeluaran,
-  barang: pageBarang, supplier: pageSupplier, segera: pageSegera
+  barang: pageBarang, supplier: pageSupplier, segera: pageSegera,
+  'penerimaan-harian': pageReportPenerimaanHarian
 };
 
 /* ===================== MULAI ===================== */
